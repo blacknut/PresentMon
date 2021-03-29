@@ -27,9 +27,9 @@ SOFTWARE.
 #include <algorithm>
 
 enum {
-    DEFAULT_CONSOLE_WIDTH   = 80,
-    MAX_ARG_COLUMN_WIDTH    = 40,
-    MIN_DESC_COLUMN_WIDTH   = 20,
+    DEFAULT_CONSOLE_WIDTH = 80,
+    MAX_ARG_COLUMN_WIDTH = 40,
+    MIN_DESC_COLUMN_WIDTH = 20,
     ARG_DESC_COLUMN_PADDING = 4,
 };
 
@@ -293,6 +293,7 @@ static void PrintHelp()
         "Output options (see README for file naming defaults)", nullptr,
         "-output_file path",        "Write CSV output to the provided path.",
         "-output_stdout",           "Write CSV output to STDOUT.",
+        "-output_statsd",           "Write port to StatsD connection.",
         "-multi_csv",               "Create a separate CSV file for each captured process.",
         "-no_csv",                  "Do not create any output file.",
         "-no_top",                  "Don't display active swap chains in the console window.",
@@ -355,8 +356,9 @@ static void PrintHelp()
         auto desc = s[i + 1];
         if (desc == nullptr) {
             fprintf(stderr, "\n%s:\n", arg);
-        } else {
-            fprintf(stderr, "  %-*s  ", (int) argWidth, arg);
+        }
+        else {
+            fprintf(stderr, "  %-*s  ", (int)argWidth, arg);
             for (auto len = strlen(desc); len > 0; ) {
                 if (len <= descWidth) {
                     fprintf(stderr, "%s\n", desc);
@@ -367,7 +369,7 @@ static void PrintHelp()
                 while (desc[w] != ' ') {
                     --w;
                 }
-                fprintf(stderr, "%.*s\n%-*s", (int) w, desc, (int) (argWidth + 4), "");
+                fprintf(stderr, "%.*s\n%-*s", (int)w, desc, (int)(argWidth + 4), "");
                 desc += w + 1;
                 len -= w + 1;
             }
@@ -411,44 +413,49 @@ bool ParseCommandLine(int argc, char** argv)
     args->mIncludeWindowsMixedReality = false;
     args->mMultiCsv = false;
     args->mStopExistingSession = false;
+    args->mOutputStatsdPort = 0;
 
     bool simple = false;
     bool verbose = false;
     for (int i = 1; i < argc; ++i) {
         // Capture target options:
-             if (ParseArg(argv[i], "captureall"))   { SetCaptureAll(args);                                         continue; }
+        if (ParseArg(argv[i], "captureall")) { SetCaptureAll(args);                                         continue; }
         else if (ParseArg(argv[i], "process_name")) { if (ParseValue(argv, argc, &i, &args->mTargetProcessNames))  continue; }
-        else if (ParseArg(argv[i], "exclude"))      { if (ParseValue(argv, argc, &i, &args->mExcludeProcessNames)) continue; }
-        else if (ParseArg(argv[i], "process_id"))   { if (ParseValue(argv, argc, &i, &args->mTargetPid))           continue; }
-        else if (ParseArg(argv[i], "etl_file"))     { if (ParseValue(argv, argc, &i, &args->mEtlFileName))         continue; }
+        else if (ParseArg(argv[i], "exclude")) { if (ParseValue(argv, argc, &i, &args->mExcludeProcessNames)) continue; }
+        else if (ParseArg(argv[i], "process_id")) { if (ParseValue(argv, argc, &i, &args->mTargetPid))           continue; }
+        else if (ParseArg(argv[i], "etl_file")) { if (ParseValue(argv, argc, &i, &args->mEtlFileName))         continue; }
 
         // Output options:
-        else if (ParseArg(argv[i], "output_file"))   { if (ParseValue(argv, argc, &i, &args->mOutputCsvFileName)) continue; }
+        else if (ParseArg(argv[i], "output_file")) { if (ParseValue(argv, argc, &i, &args->mOutputCsvFileName)) continue; }
         else if (ParseArg(argv[i], "output_stdout")) { args->mOutputCsvToStdout = true;                  continue; }
-        else if (ParseArg(argv[i], "multi_csv"))     { args->mMultiCsv          = true;                  continue; }
-        else if (ParseArg(argv[i], "no_csv"))        { args->mOutputCsvToFile   = false;                 continue; }
-        else if (ParseArg(argv[i], "no_top"))        { args->mConsoleOutputType = ConsoleOutput::Simple; continue; }
-        else if (ParseArg(argv[i], "qpc_time"))      { args->mOutputQpcTime     = true;                  continue; }
+        else if (ParseArg(argv[i], "multi_csv")) { args->mMultiCsv = true;                  continue; }
+        else if (ParseArg(argv[i], "no_csv")) { args->mOutputCsvToFile = false;                 continue; }
+        else if (ParseArg(argv[i], "no_top")) { args->mConsoleOutputType = ConsoleOutput::Simple; continue; }
+        else if (ParseArg(argv[i], "qpc_time")) { args->mOutputQpcTime = true;                  continue; }
 
         // Recording options:
-        else if (ParseArg(argv[i], "hotkey"))           { if (ParseValue(argv, argc, &i) && AssignHotkey(argv[i], args)) continue; }
-        else if (ParseArg(argv[i], "delay"))            { if (ParseValue(argv, argc, &i, &args->mDelay)) continue; }
-        else if (ParseArg(argv[i], "timed"))            { if (ParseValue(argv, argc, &i, &args->mTimer)) { args->mStartTimer = true; continue; } }
-        else if (ParseArg(argv[i], "exclude_dropped"))  { args->mExcludeDropped      = true; continue; }
+        else if (ParseArg(argv[i], "hotkey")) { if (ParseValue(argv, argc, &i) && AssignHotkey(argv[i], args)) continue; }
+        else if (ParseArg(argv[i], "delay")) { if (ParseValue(argv, argc, &i, &args->mDelay)) continue; }
+        else if (ParseArg(argv[i], "timed")) { if (ParseValue(argv, argc, &i, &args->mTimer)) { args->mStartTimer = true; continue; } }
+        else if (ParseArg(argv[i], "exclude_dropped")) { args->mExcludeDropped = true; continue; }
         else if (ParseArg(argv[i], "scroll_indicator")) { args->mScrollLockIndicator = true; continue; }
-        else if (ParseArg(argv[i], "simple"))           { simple                     = true; continue; }
-        else if (ParseArg(argv[i], "verbose"))          { verbose                    = true; continue; }
+        else if (ParseArg(argv[i], "simple")) { simple = true; continue; }
+        else if (ParseArg(argv[i], "verbose")) { verbose = true; continue; }
 
         // Execution options:
-        else if (ParseArg(argv[i], "session_name"))           { if (ParseValue(argv, argc, &i, &args->mSessionName)) continue; }
-        else if (ParseArg(argv[i], "stop_existing_session"))  { args->mStopExistingSession = true;  continue; }
-        else if (ParseArg(argv[i], "dont_restart_as_admin"))  { args->mTryToElevate        = false; continue; }
+        else if (ParseArg(argv[i], "session_name")) { if (ParseValue(argv, argc, &i, &args->mSessionName)) continue; }
+        else if (ParseArg(argv[i], "stop_existing_session")) { args->mStopExistingSession = true;  continue; }
+        else if (ParseArg(argv[i], "dont_restart_as_admin")) { args->mTryToElevate = false; continue; }
         else if (ParseArg(argv[i], "terminate_on_proc_exit")) { args->mTerminateOnProcExit = true;  continue; }
-        else if (ParseArg(argv[i], "terminate_after_timed"))  { args->mTerminateAfterTimer = true;  continue; }
+        else if (ParseArg(argv[i], "terminate_after_timed")) { args->mTerminateAfterTimer = true;  continue; }
+
+        // Blacknut options:
+        else if (ParseArg(argv[i], "output_statsd")) { if (ParseValue(argv, argc, &i, &args->mOutputStatsdPort))  continue; }
+
 
         // Beta options:
-        else if (ParseArg(argv[i], "qpc_time_s"))            { args->mOutputQpcTimeInSeconds     = true; continue; }
-        else if (ParseArg(argv[i], "terminate_existing"))    { args->mTerminateExisting          = true; continue; }
+        else if (ParseArg(argv[i], "qpc_time_s")) { args->mOutputQpcTimeInSeconds = true; continue; }
+        else if (ParseArg(argv[i], "terminate_existing")) { args->mTerminateExisting = true; continue; }
         else if (ParseArg(argv[i], "include_mixed_reality")) { args->mIncludeWindowsMixedReality = true; continue; }
 
         // Provided argument wasn't recognized
@@ -549,7 +556,8 @@ bool ParseCommandLine(int argc, char** argv)
         if (args->mOutputCsvToFile) {
             fprintf(stderr, "warning: could not initialize console display; continuing with -no_top.\n");
             args->mConsoleOutputType = ConsoleOutput::Simple;
-        } else {
+        }
+        else {
             fprintf(stderr, "error: could not initialize console display; use -no_top or -output_stdout in this environment.\n");
             PrintHelp();
             return false;

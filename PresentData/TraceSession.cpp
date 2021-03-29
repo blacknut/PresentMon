@@ -108,7 +108,7 @@ ULONG EnableProviders(
                 Microsoft_Windows_DxgKrnl::Flip_Info::Id,
                 Microsoft_Windows_DxgKrnl::FlipMultiPlaneOverlay_Info::Id,
                 Microsoft_Windows_DxgKrnl::HSyncDPCMultiPlane_Info::Id,
-                Microsoft_Windows_DxgKrnl::VSyncDPCMultiPlane_Info::Id,
+                //Microsoft_Windows_DxgKrnl::VSyncDPCMultiPlane_Info::Id,
                 Microsoft_Windows_DxgKrnl::MMIOFlip_Info::Id,
                 Microsoft_Windows_DxgKrnl::MMIOFlipMultiPlaneOverlay_Info::Id,
                 Microsoft_Windows_DxgKrnl::Present_Info::Id,

@@ -65,14 +65,15 @@ enum class ConsoleOutput {
 struct CommandLineArgs {
     std::vector<const char*> mTargetProcessNames;
     std::vector<const char*> mExcludeProcessNames;
-    const char *mOutputCsvFileName;
-    const char *mEtlFileName;
-    const char *mSessionName;
+    const char* mOutputCsvFileName;
+    const char* mEtlFileName;
+    const char* mSessionName;
     UINT mTargetPid;
     UINT mDelay;
     UINT mTimer;
     UINT mHotkeyModifiers;
     UINT mHotkeyVirtualKeyCode;
+    UINT mOutputStatsdPort; // For Blacknut
     ConsoleOutput mConsoleOutputType;
     Verbosity mVerbosity;
     bool mOutputCsvToFile;
@@ -109,11 +110,17 @@ struct OutputCsv {
     FILE* mWmrFile;
 };
 
+struct OutputStatsd {
+    SOCKET      mSocket;
+    SOCKADDR_IN mStatsdConnection;
+};
+
 struct ProcessInfo {
     std::string mModuleName;
     std::unordered_map<uint64_t, SwapChainData> mSwapChain;
     HANDLE mHandle;
     OutputCsv mOutputCsv;
+    OutputStatsd mOutputStatsd;
     bool mTargetProcess;
 };
 
@@ -142,6 +149,10 @@ void UpdateCsv(ProcessInfo* processInfo, SwapChainData const& chain, PresentEven
 const char* FinalStateToDroppedString(PresentResult res);
 const char* PresentModeToString(PresentMode mode);
 const char* RuntimeToString(Runtime rt);
+
+// StatsdOutput.cpp:
+OutputStatsd GetOutputStatsd(ProcessInfo* processInfo);
+void UpdateStatsd(ProcessInfo* processInfo, SwapChainData const& chain, PresentEvent const& p);
 
 // MainThread.cpp:
 void ExitMainThread();

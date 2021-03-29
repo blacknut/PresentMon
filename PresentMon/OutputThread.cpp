@@ -66,7 +66,7 @@ void SetOutputRecordingState(bool record)
     }
 
     uint64_t qpc = 0;
-    QueryPerformanceCounter((LARGE_INTEGER*) &qpc);
+    QueryPerformanceCounter((LARGE_INTEGER*)&qpc);
 
     EnterCriticalSection(&gRecordingToggleCS);
     gRecordingToggleHistory.emplace_back(qpc);
@@ -142,11 +142,11 @@ static void InitProcessInfo(ProcessInfo* processInfo, uint32_t processId, HANDLE
 {
     auto target = IsTargetProcess(processId, processName);
 
-    processInfo->mHandle             = handle;
-    processInfo->mModuleName         = processName;
-    processInfo->mOutputCsv.mFile    = nullptr;
+    processInfo->mHandle = handle;
+    processInfo->mModuleName = processName;
+    processInfo->mOutputCsv.mFile = nullptr;
     processInfo->mOutputCsv.mWmrFile = nullptr;
-    processInfo->mTargetProcess      = target;
+    processInfo->mTargetProcess = target;
 
     if (target) {
         gTargetProcessCount += 1;
@@ -201,7 +201,7 @@ static void CheckForTerminatedRealtimeProcesses(std::vector<std::pair<uint32_t, 
         DWORD exitCode = 0;
         if (processInfo->mHandle != NULL && GetExitCodeProcess(processInfo->mHandle, &exitCode) && exitCode != STILL_ACTIVE) {
             uint64_t qpc = 0;
-            QueryPerformanceCounter((LARGE_INTEGER*) &qpc);
+            QueryPerformanceCounter((LARGE_INTEGER*)&qpc);
             terminatedProcesses->emplace_back(processId, qpc);
             CloseHandle(processInfo->mHandle);
             processInfo->mHandle = NULL;
@@ -245,7 +245,8 @@ static void UpdateProcesses(std::vector<ProcessEvent> const& processEvents, std:
             if (newProcess) {
                 InitProcessInfo(processInfo, processEvent.ProcessId, NULL, processEvent.ImageFileName);
             }
-        } else {
+        }
+        else {
             // Note any process termination in terminatedProcess, to be handled
             // once the present event stream catches up to the termination time.
             terminatedProcesses->emplace_back(processEvent.ProcessId, processEvent.QpcTime);
@@ -254,7 +255,7 @@ static void UpdateProcesses(std::vector<ProcessEvent> const& processEvents, std:
 }
 
 static void AddPresents(std::vector<std::shared_ptr<PresentEvent>> const& presentEvents, size_t* presentEventIndex,
-                        bool recording, bool checkStopQpc, uint64_t stopQpc, bool* hitStopQpc)
+    bool recording, bool checkStopQpc, uint64_t stopQpc, bool* hitStopQpc)
 {
     auto i = *presentEventIndex;
     for (auto n = presentEvents.size(); i < n; ++i) {
@@ -284,6 +285,7 @@ static void AddPresents(std::vector<std::shared_ptr<PresentEvent>> const& presen
         // Output CSV row if recording (need to do this before updating chain).
         if (recording) {
             UpdateCsv(processInfo, *chain, *presentEvent);
+            UpdateStatsd(processInfo, *chain, *presentEvent);
         }
 
         // Add the present to the swapchain history.
@@ -291,7 +293,8 @@ static void AddPresents(std::vector<std::shared_ptr<PresentEvent>> const& presen
 
         if (presentEvent->FinalState == PresentResult::Presented) {
             chain->mLastDisplayedPresentIndex = chain->mNextPresentIndex;
-        } else if (chain->mLastDisplayedPresentIndex == chain->mNextPresentIndex) {
+        }
+        else if (chain->mLastDisplayedPresentIndex == chain->mNextPresentIndex) {
             chain->mLastDisplayedPresentIndex = 0;
         }
 
@@ -305,8 +308,8 @@ static void AddPresents(std::vector<std::shared_ptr<PresentEvent>> const& presen
 }
 
 static void AddPresents(LateStageReprojectionData* lsrData,
-                        std::vector<std::shared_ptr<LateStageReprojectionEvent>> const& presentEvents, size_t* presentEventIndex,
-                        bool recording, bool checkStopQpc, uint64_t stopQpc, bool* hitStopQpc)
+    std::vector<std::shared_ptr<LateStageReprojectionEvent>> const& presentEvents, size_t* presentEventIndex,
+    bool recording, bool checkStopQpc, uint64_t stopQpc, bool* hitStopQpc)
 {
     auto const& args = GetCommandLineArgs();
 
@@ -315,7 +318,7 @@ static void AddPresents(LateStageReprojectionData* lsrData,
         auto presentEvent = presentEvents[i];
         assert(presentEvent->Completed);
         assert(presentEvent->Source.pHolographicFrame == nullptr ||
-               presentEvent->Source.pHolographicFrame->Completed);
+            presentEvent->Source.pHolographicFrame->Completed);
 
         // Stop processing events if we hit the next stop time.
         if (checkStopQpc && presentEvent->QpcTime >= stopQpc) {
@@ -356,7 +359,7 @@ static void PruneHistory(
     auto latestQpc = max(max(
         processEvents.empty() ? 0ull : processEvents.back().QpcTime,
         presentEvents.empty() ? 0ull : presentEvents.back()->QpcTime),
-        lsrEvents.empty()     ? 0ull : lsrEvents.back()->QpcTime);
+        lsrEvents.empty() ? 0ull : lsrEvents.back()->QpcTime);
 
     auto minQpc = latestQpc - SecondsDeltaToQpc(2.0);
 
@@ -422,7 +425,7 @@ static void ProcessEvents(
     size_t recordingToggleIndex = 0;
     size_t terminatedProcessIndex = 0;
     for (;;) {
-        auto checkRecordingToggle   = recordingToggleIndex < recordingToggleHistory->size();
+        auto checkRecordingToggle = recordingToggleIndex < recordingToggleHistory->size();
         auto nextRecordingToggleQpc = checkRecordingToggle ? (*recordingToggleHistory)[recordingToggleIndex] : 0ull;
         auto hitNextRecordingToggle = false;
 

@@ -146,6 +146,7 @@ static void InitProcessInfo(ProcessInfo* processInfo, uint32_t processId, HANDLE
     processInfo->mModuleName = processName;
     processInfo->mOutputCsv.mFile = nullptr;
     processInfo->mOutputCsv.mWmrFile = nullptr;
+    processInfo->mOutputStatsd.mSocket = 0;
     processInfo->mTargetProcess = target;
 
     if (target) {

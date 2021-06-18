@@ -37,7 +37,7 @@ OutputStatsd GetOutputStatsd(ProcessInfo* processInfo)
     // every time PresentMon wants to output to the file. We should detect the
     // failure and generate an error instead.
 
-    if (args.mOutputStatsdPort != 0)
+    if( (args.mOutputStatsdPort != 0) && (processInfo->mOutputStatsd.mSocket == 0) )
     {
         processInfo->mOutputStatsd = CreateOutputStatsd();
     }

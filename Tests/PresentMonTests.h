@@ -1,24 +1,6 @@
-/*
-Copyright 2020 Intel Corporation
+// Copyright (C) 2020-2021 Intel Corporation
+// SPDX-License-Identifier: MIT
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
 #define NOMINMAX
 #include <gtest/gtest.h>
 #include <string>
@@ -36,19 +18,19 @@ struct PresentMonCsv
         "PresentFlags",
         "Dropped",
         "TimeInSeconds",
-        "MsBetweenPresents",
-        "MsInPresentAPI",
+        "msBetweenPresents",
+        "msInPresentAPI",
     };
 
-    static constexpr char const* const NOT_SIMPLE_HEADER[] = {
+    static constexpr char const* const TRACK_DISPLAY_HEADER[] = {
         "AllowsTearing",
         "PresentMode",
-        "MsBetweenDisplayChange",
-        "MsUntilRenderComplete",
-        "MsUntilDisplayed",
+        "msBetweenDisplayChange",
+        "msUntilRenderComplete",
+        "msUntilDisplayed",
     };
 
-    static constexpr char const* const VERBOSE_HEADER[] = {
+    static constexpr char const* const TRACK_DEBUG_HEADER[] = {
         "WasBatched",
         "DwmNotified",
     };
@@ -57,32 +39,34 @@ struct PresentMonCsv
         "QPCTime",
     };
 
-    static constexpr char const* GetHeader(size_t h)
+    static constexpr char const* GetHeader(size_t idx)
     {
-        constexpr auto n0 = _countof(PresentMonCsv::REQUIRED_HEADER);
-        constexpr auto n1 = _countof(PresentMonCsv::NOT_SIMPLE_HEADER);
-        constexpr auto n2 = _countof(PresentMonCsv::VERBOSE_HEADER);
-        constexpr auto n3 = _countof(PresentMonCsv::OPT_HEADER);
+        if (idx < _countof(PresentMonCsv::REQUIRED_HEADER)) return PresentMonCsv::REQUIRED_HEADER[idx];
+        idx -= _countof(PresentMonCsv::REQUIRED_HEADER);
 
-        return
-            h < n0                ? PresentMonCsv::REQUIRED_HEADER  [h] :
-            h - n0 < n1           ? PresentMonCsv::NOT_SIMPLE_HEADER[h - n0] :
-            h - n0 - n1 < n2      ? PresentMonCsv::VERBOSE_HEADER   [h - n0 - n1] :
-            h - n0 - n1 - n2 < n3 ? PresentMonCsv::OPT_HEADER       [h - n0 - n1 - n2] :
-                                    "Unknown";
+        if (idx < _countof(PresentMonCsv::TRACK_DISPLAY_HEADER)) return PresentMonCsv::TRACK_DISPLAY_HEADER[idx];
+        idx -= _countof(PresentMonCsv::TRACK_DISPLAY_HEADER);
+
+        if (idx < _countof(PresentMonCsv::TRACK_DEBUG_HEADER)) return PresentMonCsv::TRACK_DEBUG_HEADER[idx];
+        idx -= _countof(PresentMonCsv::TRACK_DEBUG_HEADER);
+
+        if (idx < _countof(PresentMonCsv::OPT_HEADER)) return PresentMonCsv::OPT_HEADER[idx];
+        idx -= _countof(PresentMonCsv::OPT_HEADER);
+
+        return "Unknown";
     }
 
     std::wstring path_;
     size_t line_;
     FILE* fp_;
     size_t headerColumnIndex_[_countof(REQUIRED_HEADER) +
-                              _countof(NOT_SIMPLE_HEADER) +
-                              _countof(VERBOSE_HEADER) +
+                              _countof(TRACK_DISPLAY_HEADER) +
+                              _countof(TRACK_DEBUG_HEADER) +
                               _countof(OPT_HEADER)];
     char row_[1024];
     std::vector<char const*> cols_;
-    bool simple_;
-    bool verbose_;
+    bool trackDisplay_;
+    bool trackDebug_;
 
     PresentMonCsv();
     bool Open(char const* file, int line, std::wstring const& path);

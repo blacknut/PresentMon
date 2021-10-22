@@ -1,24 +1,5 @@
-/*
-Copyright 2017-2020 Intel Corporation
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
+// Copyright (C) 2019-2021 Intel Corporation
+// SPDX-License-Identifier: MIT
 
 #include "PresentMon.hpp"
 
@@ -76,17 +57,17 @@ static void WriteCsvHeader(FILE* fp)
         ",PresentFlags"
         ",Dropped"
         ",TimeInSeconds"
-        ",MsInPresentAPI"
-        ",MsBetweenPresents");
-    if (args.mVerbosity > Verbosity::Simple) {
+        ",msInPresentAPI"
+        ",msBetweenPresents");
+    if (args.mTrackDisplay) {
         fprintf(fp,
             ",AllowsTearing"
             ",PresentMode"
-            ",MsUntilRenderComplete"
-            ",MsUntilDisplayed"
-            ",MsBetweenDisplayChange");
+            ",msUntilRenderComplete"
+            ",msUntilDisplayed"
+            ",msBetweenDisplayChange");
     }
-    if (args.mVerbosity >= Verbosity::Verbose) {
+    if (args.mTrackDebug) {
         fprintf(fp,
             ",WasBatched"
             ",DwmNotified");
@@ -129,7 +110,7 @@ void UpdateCsv(ProcessInfo* processInfo, SwapChainData const& chain, PresentEven
     double msUntilDisplayed       = 0.0;
     double msBetweenDisplayChange = 0.0;
 
-    if (args.mVerbosity > Verbosity::Simple) {
+    if (args.mTrackDisplay) {
         if (p.ReadyTime > 0) {
             msUntilRenderComplete = 1000.0 * QpcDeltaToSeconds(p.ReadyTime - p.QpcTime);
         }
@@ -144,7 +125,7 @@ void UpdateCsv(ProcessInfo* processInfo, SwapChainData const& chain, PresentEven
     }
 
     // Output in CSV format
-    fprintf(fp, "%s,%d,0x%016llX,%s,%d,%d,%s,%lf,%lf,%lf",
+    fprintf(fp, "%s,%d,0x%016llX,%s,%d,%d,%s,%.*lf,%.*lf,%.*lf",
         processInfo->mModuleName.c_str(),
         p.ProcessId,
         p.SwapChainAddress,
@@ -152,25 +133,25 @@ void UpdateCsv(ProcessInfo* processInfo, SwapChainData const& chain, PresentEven
         p.SyncInterval,
         p.PresentFlags,
         FinalStateToDroppedString(p.FinalState),
-        timeInSeconds,
-        msInPresentApi,
-        msBetweenPresents);
-    if (args.mVerbosity > Verbosity::Simple) {
-        fprintf(fp, ",%d,%s,%lf,%lf,%lf",
+        DBL_DIG - 1, timeInSeconds,
+        DBL_DIG - 1, msInPresentApi,
+        DBL_DIG - 1, msBetweenPresents);
+    if (args.mTrackDisplay) {
+        fprintf(fp, ",%d,%s,%.*lf,%.*lf,%.*lf",
             p.SupportsTearing,
             PresentModeToString(p.PresentMode),
-            msUntilRenderComplete,
-            msUntilDisplayed,
-            msBetweenDisplayChange);
+            DBL_DIG - 1, msUntilRenderComplete,
+            DBL_DIG - 1, msUntilDisplayed,
+            DBL_DIG - 1, msBetweenDisplayChange);
     }
-    if (args.mVerbosity >= Verbosity::Verbose) {
+    if (args.mTrackDebug) {
         fprintf(fp, ",%d,%d",
             p.DriverBatchThreadId != 0,
             p.DwmNotified);
     }
     if (args.mOutputQpcTime) {
         if (args.mOutputQpcTimeInSeconds) {
-            fprintf(fp, ",%lf", QpcDeltaToSeconds(p.QpcTime));
+            fprintf(fp, ",%.*lf", DBL_DIG - 1, QpcDeltaToSeconds(p.QpcTime));
         } else {
             fprintf(fp, ",%llu", p.QpcTime);
         }
@@ -251,7 +232,7 @@ static OutputCsv CreateOutputCsv(char const* processName)
 
         fopen_s(&outputCsv.mFile, path, "wb");
 
-        if (args.mIncludeWindowsMixedReality) {
+        if (args.mTrackWMR) {
             outputCsv.mWmrFile = CreateLsrCsvFile(path);
         }
     }

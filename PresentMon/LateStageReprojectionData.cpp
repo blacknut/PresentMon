@@ -1,28 +1,9 @@
-/*
-Copyright 2017-2020 Intel Corporation
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
-
-#include <algorithm>
+// Copyright (C) 2019-2021 Intel Corporation
+// SPDX-License-Identifier: MIT
 
 #include "PresentMon.hpp"
+
+#include <algorithm>
 
 enum {
     MAX_HISTORY_TIME = 3000,
@@ -223,26 +204,26 @@ FILE* CreateLsrCsvFile(char const* path)
 
     // Print CSV header
     fprintf(fp, "Application,ProcessID,DwmProcessID");
-    if (args.mVerbosity >= Verbosity::Verbose) {
+    if (args.mTrackDebug) {
         fprintf(fp, ",HolographicFrameID");
     }
     fprintf(fp, ",TimeInSeconds");
-    if (args.mVerbosity > Verbosity::Simple) {
-        fprintf(fp, ",MsBetweenAppPresents,MsAppPresentToLsr");
+    if (args.mTrackDisplay) {
+        fprintf(fp, ",msBetweenAppPresents,msAppPresentToLsr");
     }
-    fprintf(fp, ",MsBetweenLsrs,AppMissed,LsrMissed");
-    if (args.mVerbosity >= Verbosity::Verbose) {
-        fprintf(fp, ",MsSourceReleaseFromRenderingToLsrAcquire,MsAppCpuRenderFrame");
+    fprintf(fp, ",msBetweenLsrs,AppMissed,LsrMissed");
+    if (args.mTrackDebug) {
+        fprintf(fp, ",msSourceReleaseFromRenderingToLsrAcquire,msAppCpuRenderFrame");
     }
-    fprintf(fp, ",MsAppPoseLatency");
-    if (args.mVerbosity >= Verbosity::Verbose) {
-        fprintf(fp, ",MsAppMisprediction,MsLsrCpuRenderFrame");
+    fprintf(fp, ",msAppPoseLatency");
+    if (args.mTrackDebug) {
+        fprintf(fp, ",msAppMisprediction,msLsrCpuRenderFrame");
     }
-    fprintf(fp, ",MsLsrPoseLatency,MsActualLsrPoseLatency,MsTimeUntilVsync,MsLsrThreadWakeupToGpuEnd,MsLsrThreadWakeupError");
-    if (args.mVerbosity >= Verbosity::Verbose) {
-        fprintf(fp, ",MsLsrThreadWakeupToCpuRenderFrameStart,MsCpuRenderFrameStartToHeadPoseCallbackStart,MsGetHeadPose,MsHeadPoseCallbackStopToInputLatch,MsInputLatchToGpuSubmission");
+    fprintf(fp, ",msLsrPoseLatency,msActualLsrPoseLatency,msTimeUntilVsync,msLsrThreadWakeupToGpuEnd,msLsrThreadWakeupError");
+    if (args.mTrackDebug) {
+        fprintf(fp, ",msLsrThreadWakeupToCpuRenderFrameStart,msCpuRenderFrameStartToHeadPoseCallbackStart,msGetHeadPose,msHeadPoseCallbackStopToInputLatch,msInputLatchToGpuSubmission");
     }
-    fprintf(fp, ",MsLsrPreemption,MsLsrExecution,MsCopyPreemption,MsCopyExecution,MsGpuEndToVsync");
+    fprintf(fp, ",msLsrPreemption,msLsrExecution,msCopyPreemption,msCopyExecution,msGpuEndToVsync");
     fprintf(fp, "\n");
 
     return fp;
@@ -272,11 +253,11 @@ void UpdateLsrCsv(LateStageReprojectionData& lsr, ProcessInfo* proc, LateStageRe
     const double timeInSeconds = QpcToSeconds(p.QpcTime);
 
     fprintf(fp, "%s,%d,%d", proc->mModuleName.c_str(), curr.GetAppProcessId(), curr.ProcessId);
-    if (args.mVerbosity >= Verbosity::Verbose) {
+    if (args.mTrackDebug) {
         fprintf(fp, ",%d", curr.GetAppFrameId());
     }
     fprintf(fp, ",%.6lf", timeInSeconds);
-    if (args.mVerbosity > Verbosity::Simple) {
+    if (args.mTrackDisplay) {
         double appPresentDeltaMilliseconds = 0.0;
         double appPresentToLsrMilliseconds = 0.0;
         if (curr.IsValidAppFrame()) {
@@ -291,11 +272,11 @@ void UpdateLsrCsv(LateStageReprojectionData& lsr, ProcessInfo* proc, LateStageRe
         fprintf(fp, ",%.6lf,%.6lf", appPresentDeltaMilliseconds, appPresentToLsrMilliseconds);
     }
     fprintf(fp, ",%.6lf,%d,%d", deltaMilliseconds, !curr.NewSourceLatched, curr.MissedVsyncCount);
-    if (args.mVerbosity >= Verbosity::Verbose) {
+    if (args.mTrackDebug) {
         fprintf(fp, ",%.6lf,%.6lf", 1000 * QpcDeltaToSeconds(curr.Source.GetReleaseFromRenderingToAcquireForPresentationTime()), 1000.0 * QpcDeltaToSeconds(curr.GetAppCpuRenderFrameTime()));
     }
     fprintf(fp, ",%.6lf", curr.AppPredictionLatencyMs);
-    if (args.mVerbosity >= Verbosity::Verbose) {
+    if (args.mTrackDebug) {
         fprintf(fp, ",%.6lf,%.6lf", curr.AppMispredictionMs, curr.GetLsrCpuRenderFrameMs());
     }
     fprintf(fp, ",%.6lf,%.6lf,%.6lf,%.6lf,%.6lf",
@@ -304,7 +285,7 @@ void UpdateLsrCsv(LateStageReprojectionData& lsr, ProcessInfo* proc, LateStageRe
         curr.TimeUntilVsyncMs,
         curr.GetLsrThreadWakeupStartLatchToGpuEndMs(),
         curr.TotalWakeupErrorMs);
-    if (args.mVerbosity >= Verbosity::Verbose) {
+    if (args.mTrackDebug) {
         fprintf(fp, ",%.6lf,%.6lf,%.6lf,%.6lf,%.6lf",
             curr.ThreadWakeupStartLatchToCpuRenderFrameStartInMs,
             curr.CpuRenderFrameStartToHeadPoseCallbackStartInMs,
@@ -338,7 +319,7 @@ void UpdateConsole(std::unordered_map<uint32_t, ProcessInfo> const& activeProces
             const double fps = lsr.ComputeSourceFps();
             const size_t historySize = lsr.ComputeHistorySize();
 
-            if (args.mVerbosity > Verbosity::Simple) {
+            if (args.mTrackDisplay) {
                 auto const& appProcess = activeProcesses.find(runtimeStats.mAppProcessId)->second;
                 ConsolePrintLn("    App - %s[%d]:", appProcess.mModuleName.c_str(), runtimeStats.mAppProcessId);
                 ConsolePrint("        %.2lf ms/frame (%.1lf fps, %.2lf ms CPU", 1000.0 / fps, fps, runtimeStats.mAppSourceCpuRenderTimeInMs);

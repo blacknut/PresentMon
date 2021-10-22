@@ -86,7 +86,7 @@ void UpdateStatsd(ProcessInfo* processInfo, SwapChainData const& chain, PresentE
     double msUntilDisplayed = 0.0;
     double msBetweenDisplayChange = 0.0;
 
-    if (args.mVerbosity > Verbosity::Simple) {
+    if (args.mTrackDisplay) {
         if (p.ReadyTime > 0) {
             msUntilRenderComplete = 1000.0 * QpcDeltaToSeconds(p.ReadyTime - p.QpcTime);
         }

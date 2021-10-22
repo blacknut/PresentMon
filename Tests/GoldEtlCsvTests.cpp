@@ -1,24 +1,6 @@
-/*
-Copyright 2020-2021 Intel Corporation
+// Copyright (C) 2020-2021 Intel Corporation
+// SPDX-License-Identifier: MIT
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
 #include "PresentMonTests.h"
 
 namespace {
@@ -60,8 +42,8 @@ public:
         pm.Add(L"-stop_existing_session");
         pm.AddEtlPath(etl_);
         pm.AddCsvPath(testCsv_);
-        if (goldCsv.simple_) pm.Add(L"-simple");
-        if (goldCsv.verbose_) pm.Add(L"-verbose");
+        if (!goldCsv.trackDisplay_) pm.Add(L"-no_track_display");
+        if (goldCsv.trackDebug_) pm.Add(L"-track_debug");
         if (goldCsv.GetColumnIndex("QPCTime") != SIZE_MAX) pm.Add(L"-qpc_time"); // TODO: check if %ull or %.9lf to see if -qpc_time_s
         pm.PMSTART();
         pm.PMEXITED();
@@ -106,23 +88,24 @@ public:
                         continue;
                     }
 
-                    // Floating point may be inconsistently rounded by printf accross different platforms.
-                    // Do a rounding check by ensuring the difference between the two numebrs are less than 
-                    // the final digit +-1.001
+                    // Different versions of PresentMon may output different decimal precision.  Also, 
+                    // floating point may be inconsistently rounded by printf() on different platforms.
+                    // Therefore, we do a rounding check by ensuring the difference between the two
+                    // numbers is less than 1 in the final printed digit.
 
-                    // Doubles should be good for 15 digits of precision.
-
-                    double testNumber, goldNumber;
+                    double testNumber = 0.0;
+                    double goldNumber = 0.0;
                     int testSucceededCount = sscanf_s(a, "%lf", &testNumber);
                     int goldSucceededCount = sscanf_s(b, "%lf", &goldNumber);
+                    if (testSucceededCount == 1 && goldSucceededCount == 1) {
+                        const char* testDecimalAddr = strchr(a, '.');
+                        const char* goldDecimalAddr = strchr(b, '.');
+                        size_t testDecimalNumbersCount = testDecimalAddr == nullptr ? 0 : ((a + strlen(a)) - testDecimalAddr - 1);
+                        size_t goldDecimalNumbersCount = goldDecimalAddr == nullptr ? 0 : ((b + strlen(b)) - goldDecimalAddr - 1);
+                        double threshold = pow(0.1, std::min(testDecimalNumbersCount, goldDecimalNumbersCount));
+                        double difference = testNumber - goldNumber;
 
-                    const char* testDecimalAddr = strchr(a, '.');
-                    const char* goldDecimalAddr = strchr(b, '.');
-                    if (testSucceededCount == 1 && goldSucceededCount == 1 && testDecimalAddr != NULL && goldDecimalAddr != NULL) {
-                        size_t testDecimalNumbersCount = (a + strlen(a)) - testDecimalAddr - 1;
-                        size_t goldDecimalNumbersCount = (b + strlen(b)) - goldDecimalAddr - 1;
-                        double difference = (testNumber * pow(10.0, testDecimalNumbersCount)) - (goldNumber * pow(10.0, goldDecimalNumbersCount));
-                        if (testDecimalNumbersCount == goldDecimalNumbersCount && difference > -1.001 && difference < 1.001) {
+                        if (difference > -threshold && difference < threshold) {
                             continue;
                         }
                     }

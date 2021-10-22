@@ -1,24 +1,5 @@
-/*
-Copyright 2017-2020 Intel Corporation
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
+// Copyright (C) 2017-2021 Intel Corporation
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -95,7 +76,7 @@ struct PresentEvent {
     uint64_t Hwnd;
     uint64_t TokenPtr;
     uint64_t CompositionSurfaceLuid;
-    uint32_t QueueSubmitSequence;
+    uint32_t QueueSubmitSequence;    // Submit sequence for the Present packet
     uint32_t DestWidth;
     uint32_t DestHeight;
     uint32_t DriverBatchThreadId;
@@ -107,6 +88,7 @@ struct PresentEvent {
     bool SeenDxgkPresent;
     bool SeenWin32KEvents;
     bool DwmNotified;
+    bool SeenInFrameEvent;
     bool Completed;
 
     // Additional transient tracking state
@@ -147,7 +129,9 @@ private:
 // Composed Flip (FLIP_SEQUENTIAL, FLIP_DISCARD, FlipEx):
 //   Runtime PresentStart -> TokenCompositionSurfaceObject (by thread/process, for classification and token key) ->
 //   PresentHistoryDetailed (by thread, for token ptr) -> QueueSubmit (by thread, for submit sequence) ->
-//   DxgKrnl_PresentHistory (by token ptr, for ready time) and TokenStateChanged (by token key, for discard status and screen time)
+//   DxgKrnl_PresentHistory (by token ptr, for ready time) and TokenStateChanged (by token key, for discard status and intent to present) ->
+//   DWM Present (consumes most recent present per hWnd, marks DWM thread ID) ->
+//   A fullscreen present is issued by DWM, and when it completes, this present is on screen
 //
 // Hardware Direct Flip:
 //   N/A, not currently uniquely detectable (follows the same path as composed flip)
@@ -157,7 +141,7 @@ private:
 //   [-> VSyncDPC or HSyncDPC (by submit sequence, for screen time)]
 //
 // Hardware Composed Independent Flip:
-//   Identical to hardware independent flip, but MMIOFlipMPO is received instead of MMIOFlip
+//   Identical to hardware independent flip, but VSyncDPCMPO and HSyncDPCMPO contains more than one valid plane and SubmitSequence.
 //
 // Composed Copy with GPU GDI (a.k.a. Win7 Blit):
 //   Runtime PresentStart -> DxgKrnl_Blit (by thread/process, for classification) ->
@@ -184,24 +168,25 @@ private:
 
 struct PMTraceConsumer
 {
-    PMTraceConsumer(bool filteredEvents, bool simple, bool trackedFiltering=false);
+    PMTraceConsumer();
 
     EventMetadata mMetadata;
 
-    bool mFilteredEvents;
-    bool mSimpleMode;
+    bool mFilteredEvents = false;       // Whether the trace session was configured to filter non-PresentMon events
+    bool mFilteredProcessIds = false;   // Whether to filter presents to specific processes
+    bool mTrackDisplay = true;          // Whether the analysis should track presents to display
 
     // Whether we've seen Dxgk complete a present.  This is used to indicate
     // that the Dxgk provider has started and it's safe to start tracking
     // presents.
-    bool mSeenDxgkPresentInfo;
+    bool mSeenDxgkPresentInfo = false;
 
     // Store completed presents until the consumer thread removes them using
-    // DequeuePresents().  Completed presents are those that have progressed as
-    // far as they can through the pipeline before being either discarded or
-    // hitting the screen.
+    // Dequeue*PresentEvents().  Completed presents are those that have
+    // determined to be either discarded or displayed.  Lost presents were
+    // found in an unexpected state, likely due to a missed related ETW event.
     std::mutex mPresentEventMutex;
-    std::vector<std::shared_ptr<PresentEvent>> mPresentEvents;
+    std::vector<std::shared_ptr<PresentEvent>> mCompletePresentEvents;
 
     std::mutex mLostPresentEventMutex;
     std::vector<std::shared_ptr<PresentEvent>> mLostPresentEvents;
@@ -217,7 +202,8 @@ struct PMTraceConsumer
     // mPresentByThreadId stores the in-progress present that was last operated
     // on by each thread for event sequences that are known to execute on the
     // same thread. Its members' lifetime should track the lifetime of the 
-    // runtime present API as much as possible.
+    // runtime present API as much as possible. Only one present will be going
+    // through this sequence on any particular thread at a time.
     //
     // mPresentsByProcess stores each process' in-progress presents in the
     // order that they were presented.  This is used to look up presents across
@@ -235,6 +221,9 @@ struct PMTraceConsumer
     // different than QpcTime order?  If no on these, should we combine
     // mPresentsByProcess and mPresentsByProcessAndSwapChain?
     //
+    // mPresentsBySubmitSequence is used to lookup the active present associated
+    // with a present queue packet.
+    //
     // All flip model presents (windowed flip, dFlip, iFlip) are uniquely
     // identifyed by a Win32K present history token (composition surface,
     // present count, and bind id).  mWin32KPresentHistoryTokens stores the
@@ -242,7 +231,7 @@ struct PMTraceConsumer
     // during Win32K events.
 
     // Circular buffer of all Presents, older presents will be considered lost if not completed by the next visit.
-    unsigned int mAllPresentsNextIndex;
+    unsigned int mAllPresentsNextIndex = 0;
     std::vector<std::shared_ptr<PresentEvent>> mAllPresents;
 
     // [thread id]
@@ -259,6 +248,8 @@ struct PMTraceConsumer
     // Maps from queue packet submit sequence
     // Used for Flip -> MMIOFlip -> VSyncDPC for FS, for PresentHistoryToken -> MMIOFlip -> VSyncDPC for iFlip,
     // and for Blit Submission -> Blit completion for FS Blit
+
+    // [submit sequence]
     std::map<uint32_t, std::shared_ptr<PresentEvent>> mPresentsBySubmitSequence;
 
     // [(composition surface pointer, present count, bind id)]
@@ -308,7 +299,10 @@ struct PMTraceConsumer
 
     // Presents that will be completed by DWM's next present
     std::deque<std::shared_ptr<PresentEvent>> mPresentsWaitingForDWM;
-    // Used to understand that a flip event is coming from the DWM
+
+    // Store the DWM process id, and the last DWM thread id to have started
+    // a present.  This is needed to determine if a flip event is coming from
+    // DWM, but can also be useful for targetting non-DWM processes.
     uint32_t DwmProcessId = 0;
     uint32_t DwmPresentThreadId = 0;
 
@@ -316,7 +310,6 @@ struct PMTraceConsumer
     std::map<uint64_t, std::shared_ptr<PresentEvent>> mPresentsByLegacyBlitToken;
 
     // Limit tracking to specified processes
-    bool mEnableTrackedProcessFiltering;
     std::set<uint32_t> mTrackedProcessFilter;
     std::shared_mutex mTrackedProcessFilterMutex;
 
@@ -334,7 +327,7 @@ struct PMTraceConsumer
     void DequeuePresentEvents(std::vector<std::shared_ptr<PresentEvent>>& outPresentEvents)
     {
         std::lock_guard<std::mutex> lock(mPresentEventMutex);
-        outPresentEvents.swap(mPresentEvents);
+        outPresentEvents.swap(mCompletePresentEvents);
     }
 
     void DequeueLostPresentEvents(std::vector<std::shared_ptr<PresentEvent>>& outPresentEvents)
@@ -351,10 +344,11 @@ struct PMTraceConsumer
     void HandleDxgkMMIOFlip(EVENT_HEADER const& hdr, uint32_t flipSubmitSequence, uint32_t flags);
     void HandleDxgkMMIOFlipMPO(EVENT_HEADER const& hdr, uint32_t flipSubmitSequence, uint32_t flipEntryStatusAfterFlip, bool flipEntryStatusAfterFlipValid);
     void HandleDxgkSyncDPC(EVENT_HEADER const& hdr, uint32_t flipSubmitSequence);
+    void HandleDxgkSyncDPCMPO(EVENT_HEADER const& hdr, uint32_t flipSubmitSequence, bool isMultiplane);
     void HandleDxgkPresentHistory(EVENT_HEADER const& hdr, uint64_t token, uint64_t tokenData, PresentMode knownPresentMode);
     void HandleDxgkPresentHistoryInfo(EVENT_HEADER const& hdr, uint64_t token);
 
-    void CompletePresent(std::shared_ptr<PresentEvent> p, uint32_t recurseDepth=0);
+    void CompletePresent(std::shared_ptr<PresentEvent> p);
     std::shared_ptr<PresentEvent> FindBySubmitSequence(uint32_t submitSequence);
     std::shared_ptr<PresentEvent> FindOrCreatePresent(EVENT_HEADER const& hdr);
     void TrackPresentOnThread(std::shared_ptr<PresentEvent> present);

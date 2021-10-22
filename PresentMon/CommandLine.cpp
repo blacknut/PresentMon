@@ -1,24 +1,5 @@
-/*
-Copyright 2017-2020 Intel Corporation
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
+// Copyright (C) 2017,2019-2021 Intel Corporation
+// SPDX-License-Identifier: MIT
 
 #include <generated/version.h>
 
@@ -97,31 +78,32 @@ static KeyNameCode const HOTKEY_KEYS[] = {
     { "7", 0x37 },
     { "8", 0x38 },
     { "9", 0x39 },
-    { "A", 0x42 },
-    { "B", 0x43 },
-    { "C", 0x44 },
-    { "D", 0x45 },
-    { "E", 0x46 },
-    { "F", 0x47 },
-    { "G", 0x48 },
-    { "H", 0x49 },
-    { "I", 0x4A },
-    { "J", 0x4B },
-    { "K", 0x4C },
-    { "L", 0x4D },
-    { "M", 0x4E },
-    { "N", 0x4F },
-    { "O", 0x50 },
-    { "P", 0x51 },
-    { "Q", 0x52 },
-    { "R", 0x53 },
-    { "S", 0x54 },
-    { "T", 0x55 },
-    { "U", 0x56 },
-    { "V", 0x57 },
-    { "W", 0x58 },
-    { "X", 0x59 },
-    { "Y", 0x5A },
+    { "A", 0x41 },
+    { "B", 0x42 },
+    { "C", 0x43 },
+    { "D", 0x44 },
+    { "E", 0x45 },
+    { "F", 0x46 },
+    { "G", 0x47 },
+    { "H", 0x48 },
+    { "I", 0x49 },
+    { "J", 0x4A },
+    { "K", 0x4B },
+    { "L", 0x4C },
+    { "M", 0x4D },
+    { "N", 0x4E },
+    { "O", 0x4F },
+    { "P", 0x50 },
+    { "Q", 0x51 },
+    { "R", 0x52 },
+    { "S", 0x53 },
+    { "T", 0x54 },
+    { "U", 0x55 },
+    { "V", 0x56 },
+    { "W", 0x57 },
+    { "X", 0x58 },
+    { "Y", 0x59 },
+    { "Z", 0x5A },
     { "F1", VK_F1 },
     { "F2", VK_F2 },
     { "F3", VK_F3 },
@@ -298,6 +280,7 @@ static void PrintHelp()
         "-no_csv",                  "Do not create any output file.",
         "-no_top",                  "Don't display active swap chains in the console window.",
         "-qpc_time",                "Output present time as a performance counter value.",
+        "-qpc_time_s",              "Output present time as a performance counter value converted to seconds.",
 
         "Recording options", nullptr,
         "-hotkey key",              "Use provided key to start and stop recording, writing to a"
@@ -308,30 +291,29 @@ static void PrintHelp()
         "-timed seconds",           "Stop recording after the provided amount of time.",
         "-exclude_dropped",         "Exclude dropped presents from the csv output.",
         "-scroll_indicator",        "Enable scroll lock while recording.",
-        "-simple",                  "Disable GPU/display tracking.",
-        "-verbose",                 "Adds additional data to output not relevant to normal usage.",
+        "-no_track_display",        "Disable tracking through GPU and display.",
+        "-track_debug",             "Adds additional data to output not relevant to normal usage.",
 
         "Execution options", nullptr,
         "-session_name name",       "Use the provided name to start a new realtime ETW session, instead"
                                     " of the default \"PresentMon\". This can be used to start multiple"
-                                    " realtime capture process at the same time (using distinct names)."
+                                    " realtime captures at the same time (using distinct, case insensitive names)."
                                     " A realtime PresentMon capture cannot start if there are any"
-                                    " existing sessions with the same name.  name is not sensitive to case.",
+                                    " existing sessions with the same name.",
         "-stop_existing_session",   "If a trace session with the same name is already running, stop"
                                     " the existing session (to allow this one to proceed).",
-        "-dont_restart_as_admin",   "Don't try to elevate privilege.  Elevated privilege isn't required"
-                                    " to trace a process you started, but PresentMon requires elevated"
-                                    " privilege in order to query processes started on another account."
+        "-terminate_existing",      "Terminate any existing PresentMon realtime trace sessions, then exit."
+                                    " Use with -session_name to target particular sessions.",
+        "-restart_as_admin",        "If not running with elevated privilege, restart as administrator."
+                                    " Elevated privilege isn't required to trace a process you started,"
+                                    " but it is in order to query processes started on another account."
                                     " Without it, these processes cannot be targeted by name and will be"
                                     " listed as '<error>'.",
         "-terminate_on_proc_exit",  "Terminate PresentMon when all the target processes have exited.",
         "-terminate_after_timed",   "When using -timed, terminate PresentMon after the timed capture completes.",
 
         "Beta options", nullptr,
-        "-qpc_time_s",              "Output present time as a performance counter value converted to seconds.",
-        "-terminate_existing",      "Terminate any existing PresentMon realtime trace sessions, then exit."
-                                    " Use with -session_name to target particular sessions.",
-        "-include_mixed_reality",   "Capture Windows Mixed Reality data to a CSV file with \"_WMR\" suffix.",
+        "-track_mixed_reality",     "Capture Windows Mixed Reality data to a CSV file with \"_WMR\" suffix.",
     };
 
     fprintf(stderr, "PresentMon %s\n", PRESENT_MON_VERSION);
@@ -396,27 +378,30 @@ bool ParseCommandLine(int argc, char** argv)
     args->mTimer = 0;
     args->mHotkeyModifiers = MOD_NOREPEAT;
     args->mHotkeyVirtualKeyCode = 0;
+    args->mTrackDisplay = true;
+    args->mTrackDebug = false;
+    args->mTrackWMR = false;
     args->mOutputCsvToFile = true;
     args->mOutputCsvToStdout = false;
     args->mOutputQpcTime = false;
     args->mOutputQpcTimeInSeconds = false;
     args->mScrollLockIndicator = false;
     args->mExcludeDropped = false;
-    args->mVerbosity = Verbosity::Normal;
     args->mConsoleOutputType = ConsoleOutput::Full;
     args->mTerminateExisting = false;
     args->mTerminateOnProcExit = false;
     args->mStartTimer = false;
     args->mTerminateAfterTimer = false;
     args->mHotkeySupport = false;
-    args->mTryToElevate = true;
-    args->mIncludeWindowsMixedReality = false;
+    args->mTryToElevate = false;
     args->mMultiCsv = false;
     args->mStopExistingSession = false;
     args->mOutputStatsdPort = 0;
 
-    bool simple = false;
-    bool verbose = false;
+    bool DEPRECATED_dontRestart = false;
+    bool DEPRECATED_simple = false;
+    bool DEPRECATED_verbose = false;
+    bool DEPRECATED_wmr = false;
     for (int i = 1; i < argc; ++i) {
         // Capture target options:
         if (ParseArg(argv[i], "captureall")) { SetCaptureAll(args);                                         continue; }
@@ -426,12 +411,13 @@ bool ParseCommandLine(int argc, char** argv)
         else if (ParseArg(argv[i], "etl_file")) { if (ParseValue(argv, argc, &i, &args->mEtlFileName))         continue; }
 
         // Output options:
-        else if (ParseArg(argv[i], "output_file")) { if (ParseValue(argv, argc, &i, &args->mOutputCsvFileName)) continue; }
-        else if (ParseArg(argv[i], "output_stdout")) { args->mOutputCsvToStdout = true;                  continue; }
-        else if (ParseArg(argv[i], "multi_csv")) { args->mMultiCsv = true;                  continue; }
-        else if (ParseArg(argv[i], "no_csv")) { args->mOutputCsvToFile = false;                 continue; }
-        else if (ParseArg(argv[i], "no_top")) { args->mConsoleOutputType = ConsoleOutput::Simple; continue; }
-        else if (ParseArg(argv[i], "qpc_time")) { args->mOutputQpcTime = true;                  continue; }
+        else if (ParseArg(argv[i], "output_file"))   { if (ParseValue(argv, argc, &i, &args->mOutputCsvFileName)) continue; }
+        else if (ParseArg(argv[i], "output_stdout")) { args->mOutputCsvToStdout      = true;                  continue; }
+        else if (ParseArg(argv[i], "multi_csv"))     { args->mMultiCsv               = true;                  continue; }
+        else if (ParseArg(argv[i], "no_csv"))        { args->mOutputCsvToFile        = false;                 continue; }
+        else if (ParseArg(argv[i], "no_top"))        { args->mConsoleOutputType      = ConsoleOutput::Simple; continue; }
+        else if (ParseArg(argv[i], "qpc_time"))      { args->mOutputQpcTime          = true;                  continue; }
+        else if (ParseArg(argv[i], "qpc_time_s"))    { args->mOutputQpcTimeInSeconds = true;                  continue; }
 
         // Recording options:
         else if (ParseArg(argv[i], "hotkey")) { if (ParseValue(argv, argc, &i) && AssignHotkey(argv[i], args)) continue; }
@@ -439,24 +425,27 @@ bool ParseCommandLine(int argc, char** argv)
         else if (ParseArg(argv[i], "timed")) { if (ParseValue(argv, argc, &i, &args->mTimer)) { args->mStartTimer = true; continue; } }
         else if (ParseArg(argv[i], "exclude_dropped")) { args->mExcludeDropped = true; continue; }
         else if (ParseArg(argv[i], "scroll_indicator")) { args->mScrollLockIndicator = true; continue; }
-        else if (ParseArg(argv[i], "simple")) { simple = true; continue; }
-        else if (ParseArg(argv[i], "verbose")) { verbose = true; continue; }
+        else if (ParseArg(argv[i], "no_track_display")) { args->mTrackDisplay        = false; continue; }
+        else if (ParseArg(argv[i], "track_debug"))      { args->mTrackDebug          = true; continue; }
+        else if (ParseArg(argv[i], "simple"))           { DEPRECATED_simple          = true; continue; }
+        else if (ParseArg(argv[i], "verbose"))          { DEPRECATED_verbose         = true; continue; }
 
         // Execution options:
-        else if (ParseArg(argv[i], "session_name")) { if (ParseValue(argv, argc, &i, &args->mSessionName)) continue; }
-        else if (ParseArg(argv[i], "stop_existing_session")) { args->mStopExistingSession = true;  continue; }
-        else if (ParseArg(argv[i], "dont_restart_as_admin")) { args->mTryToElevate = false; continue; }
-        else if (ParseArg(argv[i], "terminate_on_proc_exit")) { args->mTerminateOnProcExit = true;  continue; }
-        else if (ParseArg(argv[i], "terminate_after_timed")) { args->mTerminateAfterTimer = true;  continue; }
+        else if (ParseArg(argv[i], "session_name"))           { if (ParseValue(argv, argc, &i, &args->mSessionName)) continue; }
+        else if (ParseArg(argv[i], "stop_existing_session"))  { args->mStopExistingSession = true; continue; }
+        else if (ParseArg(argv[i], "terminate_existing"))     { args->mTerminateExisting   = true; continue; }
+        else if (ParseArg(argv[i], "dont_restart_as_admin"))  { DEPRECATED_dontRestart     = true; continue; }
+        else if (ParseArg(argv[i], "restart_as_admin"))       { args->mTryToElevate        = true; continue; }
+        else if (ParseArg(argv[i], "terminate_on_proc_exit")) { args->mTerminateOnProcExit = true; continue; }
+        else if (ParseArg(argv[i], "terminate_after_timed"))  { args->mTerminateAfterTimer = true; continue; }
 
         // Blacknut options:
         else if (ParseArg(argv[i], "output_statsd")) { if (ParseValue(argv, argc, &i, &args->mOutputStatsdPort))  continue; }
 
 
         // Beta options:
-        else if (ParseArg(argv[i], "qpc_time_s")) { args->mOutputQpcTimeInSeconds = true; continue; }
-        else if (ParseArg(argv[i], "terminate_existing")) { args->mTerminateExisting = true; continue; }
-        else if (ParseArg(argv[i], "include_mixed_reality")) { args->mIncludeWindowsMixedReality = true; continue; }
+        else if (ParseArg(argv[i], "track_mixed_reality"))   { args->mTrackWMR = true; continue; }
+        else if (ParseArg(argv[i], "include_mixed_reality")) { DEPRECATED_wmr  = true; continue; }
 
         // Provided argument wasn't recognized
         else if (!(ParseArg(argv[i], "?") || ParseArg(argv[i], "h") || ParseArg(argv[i], "help"))) {
@@ -467,16 +456,27 @@ bool ParseCommandLine(int argc, char** argv)
         return false;
     }
 
-    // Set mVerbosity enum based on simple/verbose collection specified.  If
-    // both -simple and -verbose arguments are used, ignore -simple.
-    if (verbose) {
-        if (simple) {
-            fprintf(stderr, "warning: -simple and -verbose arguments are not compatible; ignoring -simple.\n");
-        }
-        args->mVerbosity = Verbosity::Verbose;
+    // Handle deprecated command line arguments
+    if (DEPRECATED_simple) {
+        fprintf(stderr, "warning: -simple command line argument has been deprecated; using -no_track_display instead.\n");
+        args->mTrackDisplay = false;
     }
-    else if (simple) {
-        args->mVerbosity = Verbosity::Simple;
+    if (DEPRECATED_verbose) {
+        fprintf(stderr, "warning: -verbose command line argument has been deprecated; using -track_debug instead.\n");
+        args->mTrackDebug = true;
+    }
+    if (DEPRECATED_wmr) {
+        fprintf(stderr, "warning: -include_mixed_reality command line argument has been deprecated; using -track_mixed_reality instead.\n");
+        args->mTrackWMR = true;
+    }
+    if (DEPRECATED_dontRestart) {
+        fprintf(stderr, "warning: -dont_restart_as_admin command line argument has been deprecated; it is now the default behaviour.\n");
+    }
+
+    // Ignore -no_track_display if required for other requested tracking
+    if (args->mTrackDebug && !args->mTrackDisplay) {
+        fprintf(stderr, "warning: -track_debug requires display tracking; ignoring -no_track_display.\n");
+        args->mTrackDisplay = true;
     }
 
     // Enable -qpc_time if only -qpc_time_s was provided, since we use that to
@@ -529,7 +529,7 @@ bool ParseCommandLine(int argc, char** argv)
     // Further, we're currently limited to outputing CSV to either file(s) or
     // stdout, so disallow use of both -output_file and -output_stdout.  Also,
     // since -output_stdout redirects all CSV output to stdout ignore
-    // -multi_csv or -include_mixed_reality in this case.
+    // -multi_csv or -track_mixed_reality in this case.
     if (args->mOutputCsvToStdout) {
         args->mConsoleOutputType = ConsoleOutput::None; // No warning needed if user used -no_top, just swap out Simple for None
 
@@ -544,9 +544,9 @@ bool ParseCommandLine(int argc, char** argv)
             args->mMultiCsv = false;
         }
 
-        if (args->mIncludeWindowsMixedReality) {
-            fprintf(stderr, "warning: -include_mixed_reality and -output_stdout are not compatible; ignoring -include_mixed_reality.\n");
-            args->mIncludeWindowsMixedReality = false;
+        if (args->mTrackWMR) {
+            fprintf(stderr, "warning: -track_mixed_reality and -output_stdout are not compatible; ignoring -track_mixed_reality.\n");
+            args->mTrackWMR = false;
         }
     }
 
@@ -584,11 +584,11 @@ bool ParseCommandLine(int argc, char** argv)
         args->mStartTimer ||
         args->mExcludeDropped ||
         args->mScrollLockIndicator ||
-        simple ||
-        verbose ||
+        !args->mTrackDisplay ||
+        args->mTrackDebug ||
+        args->mTrackWMR ||
         args->mTerminateOnProcExit ||
-        args->mTerminateAfterTimer ||
-        args->mIncludeWindowsMixedReality)) {
+        args->mTerminateAfterTimer)) {
         fprintf(stderr, "warning: -terminate_existing exits without capturing anything; ignoring all capture,\n");
         fprintf(stderr, "         output, and recording arguments.\n");
     }

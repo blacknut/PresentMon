@@ -1,24 +1,5 @@
-/*
-Copyright 2017-2020 Intel Corporation
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
+// Copyright (C) 2020-2021 Intel Corporation
+// SPDX-License-Identifier: MIT
 
 #define WIN32_LEAN_AND_MEAN
 #define VC_EXTRALEAN
@@ -51,7 +32,7 @@ ULONG EnableFilteredProvider(
     TRACEHANDLE sessionHandle,
     GUID const& sessionGuid, GUID const& providerGuid, UCHAR level,
     ULONGLONG anyKeywordMask, ULONGLONG allKeywordMask,
-    std::initializer_list<USHORT> const& eventIds)
+    std::vector<USHORT> const& eventIds)
 {
     assert(eventIds.size() >= ANYSIZE_ARRAY);
     assert(eventIds.size() <= MAX_EVENT_FILTER_EVENT_ID_COUNT);
@@ -93,60 +74,72 @@ ULONG EnableProviders(
     PMTraceConsumer* pmConsumer,
     MRTraceConsumer* mrConsumer)
 {
-    uint64_t keywordMask = 0;
+    uint64_t anyKeywordMask = 0;
+    uint64_t allKeywordMask = 0;
+    std::vector<USHORT> eventIds;
     ULONG status = 0;
 
     // Start backend providers first to reduce Presents being queued up before
     // we can track them.
-    if (!pmConsumer->mSimpleMode) {
-        // Microsoft_Windows_DxgKrnl
-        keywordMask =
-            (uint64_t) Microsoft_Windows_DxgKrnl::Keyword::Microsoft_Windows_DxgKrnl_Performance |
-            (uint64_t) Microsoft_Windows_DxgKrnl::Keyword::Base;
-        status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_DxgKrnl::GUID, TRACE_LEVEL_INFORMATION, keywordMask, keywordMask, {
-                Microsoft_Windows_DxgKrnl::Blit_Info::Id,
-                Microsoft_Windows_DxgKrnl::Flip_Info::Id,
-                Microsoft_Windows_DxgKrnl::FlipMultiPlaneOverlay_Info::Id,
-                Microsoft_Windows_DxgKrnl::HSyncDPCMultiPlane_Info::Id,
-                //Microsoft_Windows_DxgKrnl::VSyncDPCMultiPlane_Info::Id,
-                Microsoft_Windows_DxgKrnl::MMIOFlip_Info::Id,
-                Microsoft_Windows_DxgKrnl::MMIOFlipMultiPlaneOverlay_Info::Id,
-                Microsoft_Windows_DxgKrnl::Present_Info::Id,
-                Microsoft_Windows_DxgKrnl::PresentHistory_Start::Id,
-                Microsoft_Windows_DxgKrnl::PresentHistory_Info::Id,
-                Microsoft_Windows_DxgKrnl::PresentHistoryDetailed_Start::Id,
-                Microsoft_Windows_DxgKrnl::QueuePacket_Start::Id,
-                Microsoft_Windows_DxgKrnl::QueuePacket_Stop::Id,
-                Microsoft_Windows_DxgKrnl::VSyncDPC_Info::Id,
-            });
-        if (status != ERROR_SUCCESS) return status;
 
-        status = EnableTraceEx2(sessionHandle, &Microsoft_Windows_DxgKrnl::Win7::GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                                TRACE_LEVEL_INFORMATION, keywordMask, keywordMask, 0, nullptr);
-        if (status != ERROR_SUCCESS) return status;
+    // Microsoft_Windows_DxgKrnl
+    anyKeywordMask =
+        (uint64_t) Microsoft_Windows_DxgKrnl::Keyword::Microsoft_Windows_DxgKrnl_Performance |
+        (uint64_t) Microsoft_Windows_DxgKrnl::Keyword::Base;
+    allKeywordMask = anyKeywordMask;
+    eventIds = {
+        Microsoft_Windows_DxgKrnl::PresentHistory_Start::Id,
+    };
+    if (pmConsumer->mTrackDisplay) {
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::Blit_Info::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::Flip_Info::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::FlipMultiPlaneOverlay_Info::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::HSyncDPCMultiPlane_Info::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::VSyncDPCMultiPlane_Info::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::MMIOFlip_Info::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::MMIOFlipMultiPlaneOverlay_Info::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::Present_Info::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::PresentHistory_Info::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::PresentHistoryDetailed_Start::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::QueuePacket_Start::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::QueuePacket_Stop::Id);
+        eventIds.push_back(Microsoft_Windows_DxgKrnl::VSyncDPC_Info::Id);
+    }
+    status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_DxgKrnl::GUID, TRACE_LEVEL_INFORMATION, anyKeywordMask, allKeywordMask, eventIds);
+    if (status != ERROR_SUCCESS) return status;
 
+    status = EnableTraceEx2(sessionHandle, &Microsoft_Windows_DxgKrnl::Win7::GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+                            TRACE_LEVEL_INFORMATION, anyKeywordMask, allKeywordMask, 0, nullptr);
+    if (status != ERROR_SUCCESS) return status;
+
+    if (pmConsumer->mTrackDisplay) {
         // Microsoft_Windows_Win32k
-        keywordMask =
+        anyKeywordMask =
             (uint64_t) Microsoft_Windows_Win32k::Keyword::Updates |
             (uint64_t) Microsoft_Windows_Win32k::Keyword::Visualization |
             (uint64_t) Microsoft_Windows_Win32k::Keyword::Microsoft_Windows_Win32k_Tracing;
-        status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_Win32k::GUID, TRACE_LEVEL_INFORMATION, keywordMask,
+        allKeywordMask =
             (uint64_t) Microsoft_Windows_Win32k::Keyword::Updates |
-            (uint64_t) Microsoft_Windows_Win32k::Keyword::Microsoft_Windows_Win32k_Tracing, {
+            (uint64_t) Microsoft_Windows_Win32k::Keyword::Microsoft_Windows_Win32k_Tracing;
+        eventIds = {
             Microsoft_Windows_Win32k::TokenCompositionSurfaceObject_Info::Id,
             Microsoft_Windows_Win32k::TokenStateChanged_Info::Id,
-        });
+        };
+        status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_Win32k::GUID, TRACE_LEVEL_INFORMATION, anyKeywordMask, allKeywordMask, eventIds);
         if (status != ERROR_SUCCESS) return status;
 
         // Microsoft_Windows_Dwm_Core
-        status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_Dwm_Core::GUID, TRACE_LEVEL_VERBOSE, 0, 0, {
+        anyKeywordMask = 0;
+        allKeywordMask = anyKeywordMask;
+        eventIds = {
             Microsoft_Windows_Dwm_Core::MILEVENT_MEDIA_UCE_PROCESSPRESENTHISTORY_GetPresentHistory_Info::Id,
             Microsoft_Windows_Dwm_Core::SCHEDULE_PRESENT_Start::Id,
             Microsoft_Windows_Dwm_Core::SCHEDULE_SURFACEUPDATE_Info::Id,
             Microsoft_Windows_Dwm_Core::FlipChain_Pending::Id,
             Microsoft_Windows_Dwm_Core::FlipChain_Complete::Id,
             Microsoft_Windows_Dwm_Core::FlipChain_Dirty::Id,
-        });
+        };
+        status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_Dwm_Core::GUID, TRACE_LEVEL_VERBOSE, anyKeywordMask, allKeywordMask, eventIds);
         if (status != ERROR_SUCCESS) return status;
 
         status = EnableTraceEx2(sessionHandle, &Microsoft_Windows_Dwm_Core::Win7::GUID, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
@@ -155,25 +148,29 @@ ULONG EnableProviders(
     }
 
     // Microsoft_Windows_DXGI
-    keywordMask =
+    anyKeywordMask =
         (uint64_t) Microsoft_Windows_DXGI::Keyword::Microsoft_Windows_DXGI_Analytic |
         (uint64_t) Microsoft_Windows_DXGI::Keyword::Events;
-    status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_DXGI::GUID, TRACE_LEVEL_INFORMATION, keywordMask, keywordMask, {
+    allKeywordMask = anyKeywordMask;
+    eventIds = {
         Microsoft_Windows_DXGI::Present_Start::Id,
         Microsoft_Windows_DXGI::Present_Stop::Id,
         Microsoft_Windows_DXGI::PresentMultiplaneOverlay_Start::Id,
         Microsoft_Windows_DXGI::PresentMultiplaneOverlay_Stop::Id,
-    });
+    };
+    status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_DXGI::GUID, TRACE_LEVEL_INFORMATION, anyKeywordMask, allKeywordMask, eventIds);
     if (status != ERROR_SUCCESS) return status;
 
     // Microsoft_Windows_D3D9
-    keywordMask =
+    anyKeywordMask =
         (uint64_t) Microsoft_Windows_D3D9::Keyword::Microsoft_Windows_Direct3D9_Analytic |
         (uint64_t) Microsoft_Windows_D3D9::Keyword::Events;
-    status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_D3D9::GUID, TRACE_LEVEL_INFORMATION, keywordMask, keywordMask, {
+    allKeywordMask = anyKeywordMask;
+    eventIds = {
         Microsoft_Windows_D3D9::Present_Start::Id,
         Microsoft_Windows_D3D9::Present_Stop::Id,
-    });
+    };
+    status = EnableFilteredProvider(sessionHandle, sessionGuid, Microsoft_Windows_D3D9::GUID, TRACE_LEVEL_INFORMATION, anyKeywordMask, allKeywordMask, eventIds);
     if (status != ERROR_SUCCESS) return status;
 
     if (mrConsumer != nullptr) {
@@ -209,7 +206,7 @@ void DisableProviders(TRACEHANDLE sessionHandle)
 
 template<
     bool SAVE_FIRST_TIMESTAMP,
-    bool SIMPLE,
+    bool TRACK_DISPLAY,
     bool WMR>
 void CALLBACK EventRecordCallback(EVENT_RECORD* pEventRecord)
 {
@@ -225,22 +222,22 @@ void CALLBACK EventRecordCallback(EVENT_RECORD* pEventRecord)
 
     // TODO: specialize realtime callback to exclude NT_Process?
 
-         if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_DxgKrnl::GUID)                      session->mPMConsumer->HandleDXGKEvent              (pEventRecord);
-    else if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_Win32k::GUID)                       session->mPMConsumer->HandleWin32kEvent            (pEventRecord);
-    else if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_Dwm_Core::GUID)                     session->mPMConsumer->HandleDWMEvent               (pEventRecord);
-    else if (           hdr.ProviderId == Microsoft_Windows_DXGI::GUID)                         session->mPMConsumer->HandleDXGIEvent              (pEventRecord);
-    else if (           hdr.ProviderId == Microsoft_Windows_D3D9::GUID)                         session->mPMConsumer->HandleD3D9Event              (pEventRecord);
-    else if (           hdr.ProviderId == NT_Process::GUID)                                     session->mPMConsumer->HandleNTProcessEvent         (pEventRecord);
-    else if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_Dwm_Core::Win7::GUID)               session->mPMConsumer->HandleDWMEvent               (pEventRecord);
-    else if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::BLT_GUID)            session->mPMConsumer->HandleWin7DxgkBlt            (pEventRecord);
-    else if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::FLIP_GUID)           session->mPMConsumer->HandleWin7DxgkFlip           (pEventRecord);
-    else if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::PRESENTHISTORY_GUID) session->mPMConsumer->HandleWin7DxgkPresentHistory (pEventRecord);
-    else if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::QUEUEPACKET_GUID)    session->mPMConsumer->HandleWin7DxgkQueuePacket    (pEventRecord);
-    else if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::VSYNCDPC_GUID)       session->mPMConsumer->HandleWin7DxgkVSyncDPC       (pEventRecord);
-    else if (!SIMPLE && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::MMIOFLIP_GUID)       session->mPMConsumer->HandleWin7DxgkMMIOFlip       (pEventRecord);
-    else if (           hdr.ProviderId == Microsoft_Windows_EventMetadata::GUID)                session->mPMConsumer->HandleMetadataEvent          (pEventRecord);
-    else if (           WMR && hdr.ProviderId == DHD_PROVIDER_GUID)                             session->mMRConsumer->HandleDHDEvent               (pEventRecord);
-    else if (!SIMPLE && WMR && hdr.ProviderId == SPECTRUMCONTINUOUS_PROVIDER_GUID)              session->mMRConsumer->HandleSpectrumContinuousEvent(pEventRecord);
+         if (                 hdr.ProviderId == Microsoft_Windows_DxgKrnl::GUID)                      session->mPMConsumer->HandleDXGKEvent              (pEventRecord);
+    else if (TRACK_DISPLAY && hdr.ProviderId == Microsoft_Windows_Win32k::GUID)                       session->mPMConsumer->HandleWin32kEvent            (pEventRecord);
+    else if (TRACK_DISPLAY && hdr.ProviderId == Microsoft_Windows_Dwm_Core::GUID)                     session->mPMConsumer->HandleDWMEvent               (pEventRecord);
+    else if (                 hdr.ProviderId == Microsoft_Windows_DXGI::GUID)                         session->mPMConsumer->HandleDXGIEvent              (pEventRecord);
+    else if (                 hdr.ProviderId == Microsoft_Windows_D3D9::GUID)                         session->mPMConsumer->HandleD3D9Event              (pEventRecord);
+    else if (                 hdr.ProviderId == NT_Process::GUID)                                     session->mPMConsumer->HandleNTProcessEvent         (pEventRecord);
+    else if (TRACK_DISPLAY && hdr.ProviderId == Microsoft_Windows_Dwm_Core::Win7::GUID)               session->mPMConsumer->HandleDWMEvent               (pEventRecord);
+    else if (TRACK_DISPLAY && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::BLT_GUID)            session->mPMConsumer->HandleWin7DxgkBlt            (pEventRecord);
+    else if (TRACK_DISPLAY && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::FLIP_GUID)           session->mPMConsumer->HandleWin7DxgkFlip           (pEventRecord);
+    else if (                 hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::PRESENTHISTORY_GUID) session->mPMConsumer->HandleWin7DxgkPresentHistory (pEventRecord);
+    else if (TRACK_DISPLAY && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::QUEUEPACKET_GUID)    session->mPMConsumer->HandleWin7DxgkQueuePacket    (pEventRecord);
+    else if (TRACK_DISPLAY && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::VSYNCDPC_GUID)       session->mPMConsumer->HandleWin7DxgkVSyncDPC       (pEventRecord);
+    else if (TRACK_DISPLAY && hdr.ProviderId == Microsoft_Windows_DxgKrnl::Win7::MMIOFLIP_GUID)       session->mPMConsumer->HandleWin7DxgkMMIOFlip       (pEventRecord);
+    else if (                 hdr.ProviderId == Microsoft_Windows_EventMetadata::GUID)                session->mPMConsumer->HandleMetadataEvent          (pEventRecord);
+    else if (                 WMR && hdr.ProviderId == DHD_PROVIDER_GUID)                             session->mMRConsumer->HandleDHDEvent               (pEventRecord);
+    else if (TRACK_DISPLAY && WMR && hdr.ProviderId == SPECTRUMCONTINUOUS_PROVIDER_GUID)              session->mMRConsumer->HandleSpectrumContinuousEvent(pEventRecord);
 
 #pragma warning(pop)
 }
@@ -284,13 +281,13 @@ ULONG TraceSession::Start(
 
     // Redirect to a specialized event handler: <SAVE_FIRST_TIMESTAMP, FULL, WMR>
     auto saveFirstTimestamp = etlPath != nullptr;
-    auto simple             = pmConsumer->mSimpleMode;
-    auto includeWinMR       = mrConsumer != nullptr;
+    auto trackDisplay       = pmConsumer->mTrackDisplay;
+    auto trackWMR           = mrConsumer != nullptr;
 
     UINT callbackFlags =
         (saveFirstTimestamp ? 4 : 0) |
-        (simple             ? 2 : 0) |
-        (includeWinMR       ? 1 : 0);
+        (trackDisplay       ? 2 : 0) |
+        (trackWMR           ? 1 : 0);
     switch (callbackFlags) {
     case 0: traceProps.EventRecordCallback = &EventRecordCallback<false, false, false>; break;
     case 1: traceProps.EventRecordCallback = &EventRecordCallback<false, false, true>; break;

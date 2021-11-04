@@ -208,6 +208,7 @@ static void HandleTerminatedProcess(uint32_t processId)
         // Quit if this is the last process tracked for -terminate_on_proc_exit.
         gTargetProcessCount -= 1;
         if (args.mTerminateOnProcExit && gTargetProcessCount == 0) {
+            LOGI("No more process to track.");
             ExitMainThread();
         }
     }

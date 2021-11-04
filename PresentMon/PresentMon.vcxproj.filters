@@ -11,6 +11,7 @@
     <ClCompile Include="Privilege.cpp" />
     <ClCompile Include="TraceSession.cpp" />
     <ClCompile Include="StatsdOutput.cpp" />
+    <ClCompile Include="LogFile.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="LateStageReprojectionData.hpp" />

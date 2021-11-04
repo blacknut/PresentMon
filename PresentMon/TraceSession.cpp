@@ -105,11 +105,13 @@ void StopTraceSession()
 {
     // Stop the trace session.
     gSession.Stop();
+    LOGI("ETW session stopped.");
 
     // Wait for the consumer and output threads to end (which are using the
     // consumers).
     WaitForConsumerThreadToExit();
     StopOutputThread();
+    LOGI("output thread stopped.");
 
     // Destruct the consumers
     delete gMRConsumer;

@@ -300,6 +300,7 @@
     <ClCompile Include="ConsumerThread.cpp" />
     <ClCompile Include="CsvOutput.cpp" />
     <ClCompile Include="LateStageReprojectionData.cpp" />
+    <ClCompile Include="LogFile.cpp" />
     <ClCompile Include="MainThread.cpp" />
     <ClCompile Include="OutputThread.cpp" />
     <ClCompile Include="Privilege.cpp" />

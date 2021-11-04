@@ -314,6 +314,7 @@ static void PrintHelp()
 
         "Beta options", nullptr,
         "-track_mixed_reality",     "Capture Windows Mixed Reality data to a CSV file with \"_WMR\" suffix.",
+        "-log_file",                "File to write logs on ETW session states.",
     };
 
     fprintf(stderr, "PresentMon %s\n", PRESENT_MON_VERSION);
@@ -397,6 +398,7 @@ bool ParseCommandLine(int argc, char** argv)
     args->mMultiCsv = false;
     args->mStopExistingSession = false;
     args->mOutputStatsdPort = 0;
+    args->mLogFile = nullptr;
 
     bool DEPRECATED_dontRestart = false;
     bool DEPRECATED_simple = false;
@@ -441,7 +443,7 @@ bool ParseCommandLine(int argc, char** argv)
 
         // Blacknut options:
         else if (ParseArg(argv[i], "output_statsd")) { if (ParseValue(argv, argc, &i, &args->mOutputStatsdPort))  continue; }
-
+        else if (ParseArg(argv[i], "log_file"))      { if (ParseValue(argv, argc, &i, &args->mLogFile))  continue; }
 
         // Beta options:
         else if (ParseArg(argv[i], "track_mixed_reality"))   { args->mTrackWMR = true; continue; }

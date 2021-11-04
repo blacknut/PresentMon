@@ -67,6 +67,7 @@ struct CommandLineArgs {
     bool mTryToElevate;
     bool mMultiCsv;
     bool mStopExistingSession;
+    const char* mLogFile;
 };
 
 // CSV output only requires last presented/displayed event to compute frame
@@ -156,3 +157,9 @@ double QpcDeltaToSeconds(uint64_t qpcDelta);
 uint64_t SecondsDeltaToQpc(double secondsDelta);
 double QpcToSeconds(uint64_t qpc);
 
+// LogFile.cpp:
+void log(int level, const char* filename, const char* func, int line, const char* format, ...);
+void cleanLog();
+#define LOGI(format, ...) log(2, __FILE__, __func__, __LINE__, format, ##__VA_ARGS__)
+#define LOGW(format, ...) log(1, __FILE__, __func__, __LINE__, format, ##__VA_ARGS__)
+#define LOGE(format, ...) log(0, __FILE__, __func__, __LINE__, format, ##__VA_ARGS__)

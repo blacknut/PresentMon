@@ -183,16 +183,22 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    for (int i = 1; i < argc; i++) {
+        LOGI("param %d: %s", i, argv[i]);
+    }
+
     auto const& args = GetCommandLineArgs();
 
     // Special case handling for -terminate_existing
     if (args.mTerminateExisting) {
+        LOGI("Terminate existing ETW session.");
         auto status = TraceSession::StopNamedSession(args.mSessionName);
         switch (status) {
         case ERROR_SUCCESS: return 0;
         case ERROR_WMI_INSTANCE_NOT_FOUND: fprintf(stderr, "error: no existing sessions found: %s\n", args.mSessionName); break;
         default: fprintf(stderr, "error: failed to terminate existing session (%s): %u\n", args.mSessionName, status); break;
         }
+        LOGI("No ETW session to terminate.");
         return 7;
     }
 
@@ -248,11 +254,14 @@ int main(int argc, char** argv)
 
     // Start the ETW trace session (including consumer and output threads).
     if (!StartTraceSession()) {
+        LOGE("ETW session already exists.");
         SetConsoleCtrlHandler(HandleCtrlEvent, FALSE);
         DestroyWindow(gWnd);
         UnregisterClass(wndClass.lpszClassName, NULL);
         return 6;
     }
+    LOGI("ETW session created.");
+
 
     // If the user wants to use the scroll lock key as an indicator of when
     // PresentMon is recording events, save the original state and set scroll
@@ -298,5 +307,7 @@ int main(int argc, char** argv)
     */
     DestroyWindow(gWnd);
     UnregisterClass(wndClass.lpszClassName, NULL);
+    LOGI("PresentMon closure.");
+    cleanLog();
     return 0;
 }

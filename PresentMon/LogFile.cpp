@@ -4,6 +4,7 @@
 
 const char* logLevel[] = { "error", "warning", "info" };
 const char* defaultLogFile = "c:\\Users\\blk\\Documents\\logs\\stream.212.presentmon.log";
+const char* defaultLogTerminateFile = "c:\\Users\\blk\\Documents\\logs\\stream.212.terminate.presentmon.log";
 
 FILE* pLogFile = nullptr;
 char* streamId = nullptr;
@@ -15,15 +16,12 @@ void log(int level, const char* filename, const char* func, int line, const char
 
 	// Default log file.
 	if (logFileName == nullptr) {
-		logFileName = defaultLogFile;
-	}
-
-	FILE* pFile = nullptr;
-	fopen_s(&pFile, "c:\\Users\\blk\\Documents\\logs\\pouet.txt", "ab");
-	if (pFile != nullptr)
-	{
-		fprintf(pFile, "log file name: %s %I64d\r\n", logFileName, strlen(logFileName));
-		fflush(pFile);
+		if (args.mTerminateExisting) {
+			logFileName = defaultLogTerminateFile;
+		}
+		else {
+			logFileName = defaultLogFile;
+		}
 	}
 
 	// Initialize log file:
@@ -39,30 +37,16 @@ void log(int level, const char* filename, const char* func, int line, const char
 			char* nextPath;
 			path = strtok_s(str, "\\.", &nextPath);
 			while (path != nullptr) {
-				if (pFile != nullptr)
-				{
-					fprintf(pFile, "path: %s\r\n", path);
-					fflush(pFile);
-				}
 				if (strcmp(path, "stream") == 0) {
 					// store the stream id
 					path = strtok_s(NULL, ".", &nextPath);
 					streamId = new char[strlen(path)+1];
 					strcpy_s(streamId, strlen(path)+1, path);
 					path = nullptr;
-					if (pFile != nullptr)
-					{
-						fprintf(pFile, "stream: %s\r\n", streamId);
-						fflush(pFile);
-					}
 				}
 				else {
 					path = strtok_s(NULL, "\\.", &nextPath);
 				}
-			}
-			if (pFile != nullptr)
-			{
-				fclose(pFile);
 			}
 
 			delete[] strLogFileName;

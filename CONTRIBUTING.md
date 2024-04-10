@@ -2,7 +2,9 @@
 
 ## Requesting Features and Reporting Issues
 
-We track feature requests and issues using GitHub Issues [here](https://github.com/GameTechDev/PresentMon/issues).  Clearly describe the issue/request, as well as the impact and priority from your perspective.
+gg
+We track feature requests and issues using GitHub Issues
+[here](https://github.com/GameTechDev/PresentMon/issues).
 
 ### If you are having an issue with the installer...
 

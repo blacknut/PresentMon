@@ -201,4 +201,3 @@ void cleanLog();
 #define LOGI(format, ...) log(2, __FILE__, __func__, __LINE__, format, ##__VA_ARGS__)
 #define LOGW(format, ...) log(1, __FILE__, __func__, __LINE__, format, ##__VA_ARGS__)
 #define LOGE(format, ...) log(0, __FILE__, __func__, __LINE__, format, ##__VA_ARGS__)
-

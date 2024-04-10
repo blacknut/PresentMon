@@ -2,7 +2,6 @@
 
 #include "PresentMon.hpp"
 
-
 static SOCKET      mSocket = 0;
 static SOCKADDR_IN mStatsdConnection;
 

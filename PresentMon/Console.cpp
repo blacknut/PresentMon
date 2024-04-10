@@ -281,6 +281,30 @@ void UpdateConsole(uint32_t processId, ProcessInfo const& processInfo)
                 chain.mAvgCPUDuration,
                 CalculateFPSForPrintf(chain.mAvgCPUDuration));
 
+            // compute affordable name, max 12 alphanum, stop at first .
+            #define MAX_SANITIZED_NAME 12
+            const wchar_t* originalName = processInfo.mModuleName.c_str();
+            size_t originalNameLen = wcslen(originalName);
+            if (originalNameLen > MAX_SANITIZED_NAME) {
+                originalNameLen = MAX_SANITIZED_NAME;
+            }
+            char* sanitizedName = new char[originalNameLen + 1];
+            int sanitizedNameLen = 0;
+            for (int index = 0; index < originalNameLen; index++) {
+                wchar_t c = originalName[index];
+                if (0 != iswalnum(c)) {
+                    sanitizedName[sanitizedNameLen++] = (char)c;
+                } else if ('.' == c) {
+                    break;
+                }
+            }
+            sanitizedName[sanitizedNameLen] = 0;
+
+            // push gauges to statsd
+            UpdateStatsdGauge("app_present_ps", sanitizedName, CalculateFPSForPrintf(chain.mAvgCPUDuration));
+            UpdateStatsdGauge("app_display_ps", sanitizedName, CalculateFPSForPrintf(chain.mAvgDisplayedTime));
+            delete [] sanitizedName;
+
             if (args.mTrackDisplay) {
                 ConsolePrint(L" Display=%.3fms (%.1f fps)",
                     chain.mAvgDisplayedTime,

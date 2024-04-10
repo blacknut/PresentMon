@@ -82,7 +82,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <AdditionalLibraryDirectories>..\build\obj\PresentData-$(Platform)-$(Configuration)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>advapi32.lib;shell32.lib;tdh.lib;PresentData.lib;user32.lib</AdditionalDependencies>
+      <AdditionalDependencies>advapi32.lib;shell32.lib;tdh.lib;PresentData.lib;user32.lib;ws2_32.lib</AdditionalDependencies>
       <DelayLoadDLLs>advapi32.dll;shell32.dll;tdh.dll;user32.dll</DelayLoadDLLs>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
@@ -122,9 +122,11 @@
     <ClCompile Include="Console.cpp" />
     <ClCompile Include="ConsumerThread.cpp" />
     <ClCompile Include="CsvOutput.cpp" />
+    <ClCompile Include="LogFile.cpp" />
     <ClCompile Include="MainThread.cpp" />
     <ClCompile Include="OutputThread.cpp" />
     <ClCompile Include="Privilege.cpp" />
+    <ClCompile Include="StatsdOutput.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\build\obj\generated\command_line_options.inl" />

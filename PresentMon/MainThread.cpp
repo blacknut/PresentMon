@@ -190,6 +190,10 @@ int wmain(int argc, wchar_t** argv)
 
     auto const& args = GetCommandLineArgs();
 
+    for (int i = 1; i < argc; i++) {
+        LOGI("param %d: %S", i, argv[i]);
+    }
+
     // Special case handling for --terminate_existing_session
     if (args.mTerminateExistingSession) {
         auto status = StopNamedTraceSession(args.mSessionName);

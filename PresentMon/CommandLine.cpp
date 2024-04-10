@@ -359,6 +359,9 @@ bool ParseCommandLine(int argc, wchar_t** argv)
     args->mMultiCsv = false;
     args->mUseV1Metrics = false;
     args->mStopExistingSession = false;
+    // blk options
+    args->mStatsdPort = 0;
+    args->mLogFilename = 0;
 
     bool sessionNameSet  = false;
     bool csvOutputStdout = false;
@@ -410,6 +413,11 @@ bool ParseCommandLine(int argc, wchar_t** argv)
         else if (ParseArg(argv[i], L"restart_as_admin"))           { args->mTryToElevate             = true; continue; }
         else if (ParseArg(argv[i], L"terminate_on_proc_exit"))     { args->mTerminateOnProcExit      = true; continue; }
         else if (ParseArg(argv[i], L"terminate_after_timed"))      { args->mTerminateAfterTimer      = true; continue; }
+
+        // blk options: statsd port number
+        else if (ParseArg(argv[i], L"output_statsd")) { if (ParseValue(argv, argc, &i, &args->mStatsdPort)) continue; }
+        // blk options: logfile
+        else if (ParseArg(argv[i], L"log_file")) { if (ParseValue(argv, argc, &i, &args->mLogFilename)) continue; }
 
         // Hidden options:
         #if PRESENTMON_ENABLE_DEBUG_TRACE

@@ -82,6 +82,9 @@ struct CommandLineArgs {
     bool mMultiCsv;
     bool mUseV1Metrics;
     bool mStopExistingSession;
+    // blk additions
+    UINT mStatsdPort;
+    const wchar_t* mLogFilename;
 };
 
 // Metrics computed per-frame.  Duration and Latency metrics are in milliseconds.
@@ -187,4 +190,15 @@ void CanonicalizeProcessName(std::wstring* path);
 bool InPerfLogUsersGroup();
 bool EnableDebugPrivilege();
 int RestartAsAdministrator(int argc, wchar_t** argv);
+
+// publish a gauge over statsd
+void UpdateStatsdGauge(const char* gauge, const char* app, float value);
+void FinalizeStatsd();
+
+// LogFile.cpp:
+void log(int level, const char* filename, const char* func, int line, const char* format, ...);
+void cleanLog();
+#define LOGI(format, ...) log(2, __FILE__, __func__, __LINE__, format, ##__VA_ARGS__)
+#define LOGW(format, ...) log(1, __FILE__, __func__, __LINE__, format, ##__VA_ARGS__)
+#define LOGE(format, ...) log(0, __FILE__, __func__, __LINE__, format, ##__VA_ARGS__)
 

@@ -1,0 +1,85 @@
+#pragma once
+// must include PresentMonAPI.h before including this file
+#include <optional>
+#include <cstdint>
+#include <vector>
+#include <ranges>
+
+namespace p2c::pmon
+{
+    struct RawFrameQueryElementDefinition
+    {
+        PM_METRIC metricId;
+        uint32_t deviceId;
+        std::optional<uint32_t> index;
+    };
+
+    inline std::vector<RawFrameQueryElementDefinition> GetRawFrameDataMetricList(uint32_t activeDeviceId)
+    {
+        namespace rn = std::ranges;
+        using Element = RawFrameQueryElementDefinition;
+
+        std::vector<Element> queryElements{
+            Element{.metricId = PM_METRIC_TIME, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_SWAP_CHAIN_ADDRESS, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_PRESENT_RUNTIME, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_SYNC_INTERVAL, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_PRESENT_FLAGS, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_ALLOWS_TEARING, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_PRESENT_MODE, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_CPU_FRAME_QPC, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_FRAME_TIME, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_CPU_BUSY, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_CPU_WAIT, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_GPU_LATENCY, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_GPU_TIME, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_GPU_BUSY, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_GPU_WAIT, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_DISPLAY_LATENCY, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_DISPLAYED_TIME, .deviceId = 0 },
+            Element{.metricId = PM_METRIC_CLICK_TO_PHOTON_LATENCY, .deviceId = 0 },
+
+            Element{.metricId = PM_METRIC_GPU_POWER, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_VOLTAGE, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_FREQUENCY, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_TEMPERATURE, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_UTILIZATION, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_RENDER_COMPUTE_UTILIZATION, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEDIA_UTILIZATION, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_POWER, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_VOLTAGE, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_FREQUENCY, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_EFFECTIVE_FREQUENCY, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_TEMPERATURE, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_SIZE, .deviceId = activeDeviceId }, // special case filling static
+            Element{.metricId = PM_METRIC_GPU_MEM_USED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_MAX_BANDWIDTH, .deviceId = activeDeviceId }, // special case filling static
+            Element{.metricId = PM_METRIC_GPU_MEM_READ_BANDWIDTH, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_WRITE_BANDWIDTH, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_FAN_SPEED, .deviceId = activeDeviceId, .index = 0 },
+            Element{.metricId = PM_METRIC_GPU_FAN_SPEED, .deviceId = activeDeviceId, .index = 1 },
+            Element{.metricId = PM_METRIC_GPU_FAN_SPEED, .deviceId = activeDeviceId, .index = 2 },
+            Element{.metricId = PM_METRIC_GPU_FAN_SPEED, .deviceId = activeDeviceId, .index = 3 },
+            Element{.metricId = PM_METRIC_GPU_POWER_LIMITED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_TEMPERATURE_LIMITED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_CURRENT_LIMITED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_VOLTAGE_LIMITED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_UTILIZATION_LIMITED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_POWER_LIMITED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_TEMPERATURE_LIMITED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_CURRENT_LIMITED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_VOLTAGE_LIMITED, .deviceId = activeDeviceId },
+            Element{.metricId = PM_METRIC_GPU_MEM_UTILIZATION_LIMITED, .deviceId = activeDeviceId },
+
+            Element{.metricId = PM_METRIC_CPU_UTILIZATION },
+            Element{.metricId = PM_METRIC_CPU_POWER },
+            Element{.metricId = PM_METRIC_CPU_TEMPERATURE },
+            Element{.metricId = PM_METRIC_CPU_FREQUENCY },
+        };
+
+        // we want the order in the output csv to match the order of the metric ids
+        rn::sort(queryElements, {}, &Element::metricId);
+
+        return queryElements;
+    }
+}

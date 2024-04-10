@@ -1,25 +1,29 @@
-// Copyright (C) 2020-2021 Intel Corporation
+// Copyright (C) 2020-2023 Intel Corporation
 // SPDX-License-Identifier: MIT
 
 #include <generated/version.h>
 #include "PresentMonTests.h"
 
+#include <src/gtest-all.cc>
+
 bool EnsureDirectoryCreated(std::wstring path)
 {
-    auto dir = path.c_str();
     for (auto i = path.find(L'\\');; i = path.find(L'\\', i + 1)) {
-        if (i != std::wstring::npos) {
-            path[i] = L'\0';
+        std::wstring dir;
+        if (i == std::wstring::npos) {
+            dir = path;
+        } else {
+            dir = path.substr(0, i);
         }
 
-        auto attr = GetFileAttributes(dir);
+        auto attr = GetFileAttributes(dir.c_str());
         if (attr == INVALID_FILE_ATTRIBUTES) {
-            if (!CreateDirectory(dir, NULL)) {
-                fprintf(stderr, "error: failed to create directory: %ls\n", dir);
+            if (!CreateDirectory(dir.c_str(), NULL)) {
+                fprintf(stderr, "error: failed to create directory: %ls\n", dir.c_str());
                 return false;
             }
         } else if ((attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-            fprintf(stderr, "error: existing path is not a directory: %ls\n", dir);
+            fprintf(stderr, "error: existing path is not a directory: %ls\n", dir.c_str());
             return false;
         }
 
@@ -95,7 +99,7 @@ bool CheckPath(
     }
 
     // Update the string with the full path and end directories with separator.
-    *str = fullPath;
+    str->assign(fullPath);
     if (directory) {
         *str += L'\\';
     }
@@ -107,6 +111,9 @@ bool CheckPath(
 
 std::wstring PresentMon::exePath_;
 std::wstring outDir_;
+bool reportAllCsvDiffs_ = false;
+bool warnOnMissingCsv_ = true;
+std::wstring diffPath_;
 
 std::string Convert(std::wstring const& src)
 {
@@ -127,20 +134,54 @@ int wmain(
     wchar_t** argv)
 {
     // Set defaults
-    PresentMon::exePath_ = L"PresentMon-";
-    if (strncmp(PRESENT_MON_VERSION, "dev", 3) == 0) {
-        PresentMon::exePath_ += L"dev";
-    } else {
-        PresentMon::exePath_ += Convert(PRESENT_MON_VERSION);
-    }
-    PresentMon::exePath_ += L"-x64.exe";
-
     std::wstring goldDir(L"../../Tests/Gold");
 
     {
+        // If exe == <dir>/PresentMonTests-<ver>-<platform>.exe use
+        // <dir>/PresentMon-<ver>-<platform>.exe as the default PresentMon
+        // path.  Otherwise use same the same <dir> but reconstruct
+        // <ver>/<platform> from version header and compiler macros.
+        wchar_t path[MAX_PATH];
+        GetModuleFileName(NULL, path, _countof(path));
+        PresentMon::exePath_.assign(path);
+        size_t i = PresentMon::exePath_.size();
+        for (; i > 0; --i) {
+            if (PresentMon::exePath_[i] == '/' || PresentMon::exePath_[i] == '\\') {
+                i += 1;
+                break;
+            }
+        }
+        if (PresentMon::exePath_.compare(i, 15, L"PresentMonTests") == 0) {
+            PresentMon::exePath_.erase(i + 10, 5);
+        } else {
+            PresentMon::exePath_.erase(i);
+            PresentMon::exePath_ += L"PresentMon-";
+            if (isdigit(*PRESENT_MON_VERSION)) {
+                PresentMon::exePath_ += L"dev";
+            } else {
+                PresentMon::exePath_ += Convert(PRESENT_MON_VERSION);
+            }
+            #ifdef _WIN64
+            #ifdef _M_ARM64
+            PresentMon::exePath_ += L"-ARM64.exe";
+            #else
+            PresentMon::exePath_ += L"-x64.exe";
+            #endif
+            #else
+            #ifdef _M_ARM
+            PresentMon::exePath_ += L"-ARM.exe";
+            #else
+            PresentMon::exePath_ += L"-x86.exe";
+            #endif
+            #endif
+        }
+    }
+
+    {
+        // Default output directory = <temp>/PresentMonTestOutput/
         wchar_t path[MAX_PATH];
         GetTempPath(_countof(path), path);
-        outDir_ = path;
+        outDir_.assign(path);
         outDir_ += L"PresentMonTestOutput";
     }
 
@@ -159,11 +200,14 @@ int wmain(
                 "    --golddir=path       Path to directory of test ETLs and gold CSVs (default=%ls).\n"
                 "    --outdir=path        Path to directory for test outputs (default=%%temp%%/PresentMonTestOutput).\n"
                 "    --nodelete           Keep the output directory after tests.\n"
+                "    --nowarnmissing      Don't warn if a found ETL is missing a gold CSV.\n"
                 "    --allcsvdiffs        Report all CSV differences, not just the first.\n"
+                "    --diff=path          Start an extra process to compare each differing CSV.\n"
                 "\n",
                 PresentMon::exePath_.c_str(),
                 goldDir.c_str());
             help = true;
+            argv[i] = (wchar_t*) L"--help"; // gtest only recognises this one
             break;
         }
     }
@@ -179,7 +223,6 @@ int wmain(
     wchar_t* goldDirArg = nullptr;
     wchar_t* outDirArg = nullptr;
     bool deleteOutDir = true;
-    bool reportAllCsvDiffs = false;
     for (int i = 1; i < argc; ++i) {
         if (_wcsnicmp(argv[i], L"--presentmon=", 13) == 0) {
             presentMonPathArg = argv[i] + 13;
@@ -201,8 +244,18 @@ int wmain(
             continue;
         }
 
+        if (_wcsicmp(argv[i], L"--nowarnmissing") == 0) {
+            warnOnMissingCsv_ = false;
+            continue;
+        }
+
         if (_wcsicmp(argv[i], L"--allcsvdiffs") == 0) {
-            reportAllCsvDiffs = true;
+            reportAllCsvDiffs_ = true;
+            continue;
+        }
+
+        if (_wcsnicmp(argv[i], L"--diff=", 7) == 0) {
+            diffPath_ = argv[i] + 7;
             continue;
         }
 
@@ -221,7 +274,7 @@ int wmain(
     }
 
     if (goldDirExists) {
-        AddGoldEtlCsvTests(goldDir, goldDir.size(), reportAllCsvDiffs);
+        AddGoldEtlCsvTests(goldDir, goldDir.size());
     } else {
         fprintf(stderr, "warning: gold directory does not exist: %ls\n", goldDir.c_str());
         fprintf(stderr, "         Continuing, but no GoldEtlCsvTests.* will run.  Specify a new path\n");

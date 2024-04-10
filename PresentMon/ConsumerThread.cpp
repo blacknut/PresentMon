@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2021 Intel Corporation
+// Copyright (C) 2019-2021,2023 Intel Corporation
 // SPDX-License-Identifier: MIT
 
 #include "PresentMon.hpp"
@@ -7,6 +7,7 @@ static std::thread gThread;
 
 static void Consume(TRACEHANDLE traceHandle)
 {
+    SetThreadDescription(GetCurrentThread(), L"PresentMon Consumer Thread");
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 
     // You must call OpenTrace() prior to calling this function

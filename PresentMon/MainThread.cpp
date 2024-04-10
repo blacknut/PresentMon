@@ -1,8 +1,7 @@
-// Copyright (C) 2019-2021 Intel Corporation
+// Copyright (C) 2019-2023 Intel Corporation
 // SPDX-License-Identifier: MIT
 
 #include "PresentMon.hpp"
-#include "../PresentData/TraceSession.hpp"
 
 enum {
     HOTKEY_ID = 0x80,
@@ -46,7 +45,7 @@ static bool EnableScrollLock(bool enable)
 
         auto sendCount = SendInput(2, input, sizeof(INPUT));
         if (sendCount != 2) {
-            fprintf(stderr, "warning: could not toggle scroll lock.\n");
+            PrintWarning(L"warning: could not toggle scroll lock.\n");
         }
     }
 
@@ -66,11 +65,9 @@ static void StartRecording()
     gIsRecording = true;
 
     // Notify user we're recording
-#if !DEBUG_VERBOSE
-    if (args.mConsoleOutputType == ConsoleOutput::Simple) {
-        printf("Started recording.\n");
+    if (args.mConsoleOutput == ConsoleOutput::Simple && args.mCSVOutput != CSVOutput::None) {
+        wprintf(L"Started recording.\n");
     }
-#endif
     if (args.mScrollLockIndicator) {
         EnableScrollLock(true);
     }
@@ -78,7 +75,7 @@ static void StartRecording()
     // Tell OutputThread to record
     SetOutputRecordingState(true);
 
-    // Start -timed timer
+    // Start --timed timer
     if (args.mStartTimer) {
         SetTimer(gWnd, TIMED_TIMER_ID, args.mTimer * 1000, (TIMERPROC) nullptr);
     }
@@ -91,7 +88,7 @@ static void StopRecording()
     assert(IsRecording() == true);
     gIsRecording = false;
 
-    // Stop time -timed timer if there is one
+    // Stop time --timed timer if there is one
     if (args.mStartTimer) {
         KillTimer(gWnd, TIMED_TIMER_ID);
     }
@@ -103,11 +100,9 @@ static void StopRecording()
     if (args.mScrollLockIndicator) {
         EnableScrollLock(false);
     }
-#if !DEBUG_VERBOSE
-    if (args.mConsoleOutputType == ConsoleOutput::Simple) {
-        printf("Stopped recording.\n");
+    if (args.mConsoleOutput == ConsoleOutput::Simple && args.mCSVOutput != CSVOutput::None) {
+        wprintf(L"Stopped recording.\n");
     }
-#endif
 }
 
 // Handle Ctrl events (CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT,
@@ -176,29 +171,37 @@ void ExitMainThread()
     PostMessage(gWnd, WM_QUIT, 0, 0);
 }
 
-int main(int argc, char** argv)
+int wmain(int argc, wchar_t** argv)
 {
+    // Load system DLLs
+    LoadLibraryExA("advapi32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    LoadLibraryExA("shell32.dll",  NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    LoadLibraryExA("tdh.dll",      NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    LoadLibraryExA("user32.dll",   NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+    // Initialize console
+    SetThreadDescription(GetCurrentThread(), L"PresentMon Consumer Thread");
+    InitializeConsole();
+
     // Parse command line arguments.
     if (!ParseCommandLine(argc, argv)) {
         return 1;
     }
 
-    for (int i = 1; i < argc; i++) {
-        LOGI("param %d: %s", i, argv[i]);
-    }
-
     auto const& args = GetCommandLineArgs();
 
-    // Special case handling for -terminate_existing
-    if (args.mTerminateExisting) {
-        LOGI("Terminate existing ETW session.");
-        auto status = TraceSession::StopNamedSession(args.mSessionName);
+    for (int i = 1; i < argc; i++) {
+        LOGI("param %d: %S", i, argv[i]);
+    }
+
+    // Special case handling for --terminate_existing_session
+    if (args.mTerminateExistingSession) {
+        auto status = StopNamedTraceSession(args.mSessionName);
         switch (status) {
-        case ERROR_SUCCESS: return 0;
-        case ERROR_WMI_INSTANCE_NOT_FOUND: fprintf(stderr, "error: no existing sessions found: %s\n", args.mSessionName); break;
-        default: fprintf(stderr, "error: failed to terminate existing session (%s): %u\n", args.mSessionName, status); break;
+        case ERROR_SUCCESS:                return 0;
+        case ERROR_WMI_INSTANCE_NOT_FOUND: PrintError(L"error: no existing sessions found: %s\n", args.mSessionName); break;
+        default:                           PrintError(L"error: failed to terminate existing session (%s): %lu\n", args.mSessionName, status); break;
         }
-        LOGI("No ETW session to terminate.");
         return 7;
     }
 
@@ -219,10 +222,11 @@ int main(int argc, char** argv)
             return RestartAsAdministrator(argc, argv);
         }
 
-        fprintf(stderr,
-            "warning: PresentMon requires elevated privilege in order to query processes started\n"
-            "    on another account.  Without it, those processes will be listed as '<error>'\n"
-            "    and they can't be targeted by -process_name nor trigger -terminate_on_proc_exit.\n");
+        PrintWarning(
+            L"warning: PresentMon requires elevated privilege in order to query processes that are\n"
+            L"         short-running or started on another account.  Without it, those processes will\n"
+            L"         be listed as '<unknown>' and they can't be targeted by --process_name nor trigger\n"
+            L"         --terminate_on_proc_exit.\n");
     }
 
     // Create a message queue to handle the input messages.
@@ -230,20 +234,20 @@ int main(int argc, char** argv)
     wndClass.lpfnWndProc = HandleWindowMessage;
     wndClass.lpszClassName = L"PresentMon";
     if (!RegisterClassExW(&wndClass)) {
-        fprintf(stderr, "error: failed to register hotkey class.\n");
+        PrintError(L"error: failed to register hotkey class.\n");
         return 3;
     }
 
     gWnd = CreateWindowExW(0, wndClass.lpszClassName, L"PresentMonWnd", 0, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, nullptr);
     if (!gWnd) {
-        fprintf(stderr, "error: failed to create hotkey window.\n");
+        PrintError(L"error: failed to create hotkey window.\n");
         UnregisterClass(wndClass.lpszClassName, NULL);
         return 4;
     }
 
     // Register the hotkey.
     if (args.mHotkeySupport && !RegisterHotKey(gWnd, HOTKEY_ID, args.mHotkeyModifiers, args.mHotkeyVirtualKeyCode)) {
-        fprintf(stderr, "error: failed to register hotkey.\n");
+        PrintHotkeyError();
         DestroyWindow(gWnd);
         UnregisterClass(wndClass.lpszClassName, NULL);
         return 5;
@@ -252,16 +256,78 @@ int main(int argc, char** argv)
     // Set CTRL handler (note: must set gWnd before setting the handler).
     SetConsoleCtrlHandler(HandleCtrlEvent, TRUE);
 
-    // Start the ETW trace session (including consumer and output threads).
-    if (!StartTraceSession()) {
-        LOGE("ETW session already exists.");
+    // Create event consumers
+    PMTraceConsumer pmConsumer;
+    pmConsumer.mTrackDisplay  = args.mTrackDisplay;
+    pmConsumer.mTrackGPU      = args.mTrackGPU;
+    pmConsumer.mTrackGPUVideo = args.mTrackGPUVideo;
+    pmConsumer.mTrackInput    = args.mTrackInput;
+
+    if (args.mTargetPid != 0) {
+        pmConsumer.mFilteredProcessIds = true;
+        pmConsumer.AddTrackedProcessForFiltering(args.mTargetPid);
+    }
+
+    // Start the ETW trace session.
+    PMTraceSession pmSession;
+    pmSession.mPMConsumer = &pmConsumer;
+    auto status = pmSession.Start(args.mEtlFileName, args.mSessionName);
+
+    // If a session with this same name is already running, we either exit or
+    // stop it and start a new session.  This is useful if a previous process
+    // failed to properly shut down the session for some reason.
+    if (status == ERROR_ALREADY_EXISTS) {
+        if (args.mStopExistingSession) {
+            PrintWarning(
+                L"warning: a trace session named \"%s\" is already running and it will be stopped.\n"
+                L"         Use --session_name with a different name to start a new session.\n",
+                args.mSessionName);
+        } else {
+            PrintError(
+                L"error: a trace session named \"%s\" is already running. Use --stop_existing_session\n"
+                L"       to stop the existing session, or use --session_name with a different name to\n"
+                L"       start a new session.\n",
+                args.mSessionName);
+
+            SetConsoleCtrlHandler(HandleCtrlEvent, FALSE);
+            DestroyWindow(gWnd);
+            UnregisterClass(wndClass.lpszClassName, NULL);
+            return 6;
+        }
+
+        status = StopNamedTraceSession(args.mSessionName);
+        if (status == ERROR_SUCCESS) {
+            status = pmSession.Start(args.mEtlFileName, args.mSessionName);
+        }
+    }
+
+    // Exit with an error if we failed to start a new session
+    if (status != ERROR_SUCCESS) {
+        PrintError(L"error: failed to start trace session: ");
+        switch (status) {
+        case ERROR_FILE_NOT_FOUND: PrintError(L"file not found.\n"); break;
+        case ERROR_PATH_NOT_FOUND: PrintError(L"path not found.\n"); break;
+        case ERROR_BAD_PATHNAME:   PrintError(L"invalid --session_name.\n"); break;
+        case ERROR_ACCESS_DENIED:  PrintError(L"access denied.\n"); break;
+        case ERROR_FILE_CORRUPT:   PrintError(L"invalid --etl_file.\n"); break;
+        default:                   PrintError(L"error code %lu.\n", status); break;
+        }
+
+        if (status == ERROR_ACCESS_DENIED && !InPerfLogUsersGroup()) {
+            PrintError(
+                L"       PresentMon requires either administrative privileges or to be run by a user in the\n"
+                L"       \"Performance Log Users\" user group.  View the readme for more details.\n");
+        }
+
         SetConsoleCtrlHandler(HandleCtrlEvent, FALSE);
         DestroyWindow(gWnd);
         UnregisterClass(wndClass.lpszClassName, NULL);
         return 6;
     }
-    LOGI("ETW session created.");
 
+    // Start the consumer and output threads
+    StartConsumerThread(pmSession.mTraceHandle);
+    StartOutputThread(pmSession);
 
     // If the user wants to use the scroll lock key as an indicator of when
     // PresentMon is recording events, save the original state and set scroll
@@ -270,7 +336,7 @@ int main(int argc, char** argv)
         ? EnableScrollLock(IsRecording())
         : false;
 
-    // If the user didn't specify -hotkey, simulate a hotkey press to start the
+    // If the user didn't specify --hotkey, simulate a hotkey press to start the
     // recording right away.
     if (!args.mHotkeySupport) {
         PostMessage(gWnd, WM_HOTKEY, HOTKEY_ID, args.mHotkeyModifiers & ~MOD_NOREPEAT);
@@ -293,11 +359,26 @@ int main(int argc, char** argv)
         DispatchMessageW(&message);
     }
 
-    // Shut everything down.
+    // Stop the trace session.
     if (args.mScrollLockIndicator) {
         EnableScrollLock(originalScrollLockEnabled);
     }
-    StopTraceSession();
+
+    pmSession.Stop();
+
+    // Wait for the consumer and output threads to end (which are using the
+    // consumers).
+    WaitForConsumerThreadToExit();
+    StopOutputThread();
+
+    // Output warning if events were lost.
+    if (pmSession.mNumBuffersLost > 0) {
+        PrintWarning(L"warning: %lu ETW buffers were lost.\n", pmSession.mNumBuffersLost);
+    }
+    if (pmSession.mNumEventsLost > 0) {
+        PrintWarning(L"warning: %lu ETW events were lost.\n", pmSession.mNumEventsLost);
+    }
+
     /* We cannot remove the Ctrl handler because it is in an infinite sleep so
      * this call will never return, either hanging the application or having
      * the threshold timer trigger and force terminate (depending on what Ctrl
@@ -307,7 +388,6 @@ int main(int argc, char** argv)
     */
     DestroyWindow(gWnd);
     UnregisterClass(wndClass.lpszClassName, NULL);
-    LOGI("PresentMon closure.");
-    cleanLog();
+    FinalizeConsole();
     return 0;
 }

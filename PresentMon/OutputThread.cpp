@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2021 Intel Corporation
+// Copyright (C) 2019-2023 Intel Corporation
 // SPDX-License-Identifier: MIT
 
 #include "PresentMon.hpp"
@@ -32,86 +32,100 @@ void SetOutputRecordingState(bool record)
 {
     auto const& args = GetCommandLineArgs();
 
-    if (gIsRecording == record) {
-        return;
-    }
-
-    // When capturing from an ETL file, just use the current recording state.
-    // It's not clear how best to map realtime to ETL QPC time, and there
-    // aren't any realtime cues in this case.
-    if (args.mEtlFileName != nullptr) {
-        EnterCriticalSection(&gRecordingToggleCS);
-        gIsRecording = record;
-        LeaveCriticalSection(&gRecordingToggleCS);
-        return;
-    }
-
-    uint64_t qpc = 0;
-    QueryPerformanceCounter((LARGE_INTEGER*)&qpc);
-
     EnterCriticalSection(&gRecordingToggleCS);
-    gRecordingToggleHistory.emplace_back(qpc);
-    gIsRecording = record;
+
+    if (gIsRecording != record) {
+        gIsRecording = record;
+
+        // When capturing from an ETL file, just use the current recording state.
+        // It's not clear how best to map realtime to ETL QPC time, and there
+        // aren't any realtime cues in this case.
+        if (args.mEtlFileName == nullptr) {
+            uint64_t qpc = 0;
+            QueryPerformanceCounter((LARGE_INTEGER*) &qpc);
+            gRecordingToggleHistory.emplace_back(qpc);
+        }
+    }
+
     LeaveCriticalSection(&gRecordingToggleCS);
 }
 
 static bool CopyRecordingToggleHistory(std::vector<uint64_t>* recordingToggleHistory)
 {
-    EnterCriticalSection(&gRecordingToggleCS);
-    recordingToggleHistory->assign(gRecordingToggleHistory.begin(), gRecordingToggleHistory.end());
-    auto isRecording = gIsRecording;
-    LeaveCriticalSection(&gRecordingToggleCS);
-
-    auto recording = recordingToggleHistory->size() + (isRecording ? 1 : 0);
-    return (recording & 1) == 1;
-}
-
-// Remove recording toggle events that we've processed.
-static void UpdateRecordingToggles(size_t nextIndex)
-{
-    if (nextIndex > 0) {
+    std::vector<uint64_t> newToggles;
+    bool currentRecordingState;
+    {
         EnterCriticalSection(&gRecordingToggleCS);
-        gRecordingToggleHistory.erase(gRecordingToggleHistory.begin(), gRecordingToggleHistory.begin() + nextIndex);
+        newToggles.swap(gRecordingToggleHistory);
+        currentRecordingState = gIsRecording;
         LeaveCriticalSection(&gRecordingToggleCS);
     }
+
+    recordingToggleHistory->insert(recordingToggleHistory->end(), newToggles.begin(), newToggles.end());
+    return currentRecordingState;
 }
 
 // Processes are handled differently when running in realtime collection vs.
 // ETL collection.  When reading an ETL, we receive NT_PROCESS events whenever
 // a process is created or exits which we use to update the active processes.
 //
-// When collecting events in realtime, we update the active processes whenever
-// we notice an event with a new process id.  If it's a target process, we
-// obtain a handle to the process, and periodically check it to see if it has
-// exited.
+// When collecting events in realtime and with elevated privilege, we should
+// get similar ProcessStart/ProcessStop events, but only if PresentMon is
+// running when the process started/stopped.  If we don't have elevated
+// privilege or we missed a process start/stop we update the active processes
+// whenever we notice an event with a new process id.  If it's a target
+// process, we obtain a handle to the process, and periodically check it to see
+// if it has exited.
 
 static std::unordered_map<uint32_t, ProcessInfo> gProcesses;
 static uint32_t gTargetProcessCount = 0;
 
-static bool IsTargetProcess(uint32_t processId, std::string const& processName)
+// Removes any directory and extension, and converts the remaining name to
+// lower case.
+void CanonicalizeProcessName(std::wstring* name)
+{
+    size_t i = name->find_last_of(L"./\\");
+    if (i != std::wstring::npos && (*name)[i] == L'.') {
+        name->resize(i);
+        i = name->find_last_of(L"/\\");
+    }
+
+    *name = name->substr(i + 1);
+
+    std::transform(name->begin(), name->end(), name->begin(),
+                   [](wchar_t c) { return (wchar_t) ::towlower(c); });
+}
+
+static bool IsTargetProcess(uint32_t processId, std::wstring const& processName)
 {
     auto const& args = GetCommandLineArgs();
 
-    // -exclude
+    std::wstring compareName;
+    if (args.mExcludeProcessNames.size() + args.mTargetProcessNames.size() > 0) {
+        compareName = processName;
+        CanonicalizeProcessName(&compareName);
+    }
+
+    // --exclude
     for (auto excludeProcessName : args.mExcludeProcessNames) {
-        if (_stricmp(excludeProcessName, processName.c_str()) == 0) {
+        if (excludeProcessName == compareName) {
             return false;
         }
     }
 
-    // -capture_all
+    // --capture_all
     if (args.mTargetPid == 0 && args.mTargetProcessNames.empty()) {
         return true;
     }
 
-    // -process_id
+    // --process_id
     if (args.mTargetPid != 0 && args.mTargetPid == processId) {
         return true;
     }
 
-    // -process_name
+    // --process_name
     for (auto targetProcessName : args.mTargetProcessNames) {
-        if (_stricmp(targetProcessName, processName.c_str()) == 0) {
+        if (targetProcessName == compareName) {
             return true;
         }
     }
@@ -119,63 +133,71 @@ static bool IsTargetProcess(uint32_t processId, std::string const& processName)
     return false;
 }
 
-static void InitProcessInfo(ProcessInfo* processInfo, uint32_t processId, HANDLE handle, std::string const& processName)
+static void HandleTerminatedProcess(
+    ProcessInfo* processInfo)
 {
-    auto target = IsTargetProcess(processId, processName);
+    auto const& args = GetCommandLineArgs();
 
-    processInfo->mHandle = handle;
-    processInfo->mModuleName = processName;
-    processInfo->mOutputCsv.mFile = nullptr;
-    processInfo->mOutputCsv.mWmrFile = nullptr;
-    processInfo->mOutputStatsd.mSocket = 0;
-    processInfo->mTargetProcess = target;
+    if (processInfo->mIsTargetProcess) {
+        // Close this process' CSV.
+        CloseMultiCsv(processInfo);
 
-    if (target) {
-        gTargetProcessCount += 1;
+        // Quit if this is the last process tracked for --terminate_on_proc_exit.
+        gTargetProcessCount -= 1;
+        if (args.mTerminateOnProcExit && gTargetProcessCount == 0) {
+            ExitMainThread();
+        }
     }
 }
 
-static ProcessInfo* GetProcessInfo(uint32_t processId)
+static void ProcessProcessEvent(
+    ProcessEvent const& processEvent)
 {
-    auto result = gProcesses.emplace(processId, ProcessInfo());
-    auto processInfo = &result.first->second;
-    auto newProcess = result.second;
+    if (processEvent.IsStartEvent) {
+        auto pr = gProcesses.emplace(processEvent.ProcessId, ProcessInfo{});
+        auto info = &pr.first->second;
 
-    if (newProcess) {
-        // In ETL capture, we should have gotten an NTProcessEvent for this
-        // process updated via UpdateNTProcesses(), so this path should only
-        // happen in realtime capture.
-        //
-        // Try to open a limited handle into the process in order to query its
-        // name and also periodically check if it has terminated.  This will
-        // fail (with GetLastError() == ERROR_ACCESS_DENIED) if the process was
-        // run on another account, unless we're running with SeDebugPrivilege.
-        auto const& args = GetCommandLineArgs();
-        HANDLE handle = NULL;
-        char const* processName = "<error>";
-        if (args.mEtlFileName == nullptr) {
-            char path[MAX_PATH];
-            DWORD numChars = sizeof(path);
-            handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-            if (QueryFullProcessImageNameA(handle, 0, path, &numChars)) {
-                processName = PathFindFileNameA(path);
-            }
+        if (!pr.second) {
+            HandleTerminatedProcess(info);
         }
 
-        InitProcessInfo(processInfo, processId, handle, processName);
-    }
+        info->mHandle          = NULL;
+        info->mModuleName      = processEvent.ImageFileName;
+        info->mOutputCsv       = nullptr;
+        info->mIsTargetProcess = IsTargetProcess(processEvent.ProcessId, processEvent.ImageFileName);
 
-    return processInfo;
+        if (info->mIsTargetProcess) {
+            gTargetProcessCount += 1;
+        }
+    } else {
+        auto ii = gProcesses.find(processEvent.ProcessId);
+        if (ii != gProcesses.end()) {
+            HandleTerminatedProcess(&ii->second);
+            gProcesses.erase(std::move(ii));
+        }
+    }
 }
 
-// Check if any realtime processes terminated and add them to the terminated
-// list.
-//
-// We assume that the process terminated now, which is wrong but conservative
-// and functionally ok because no other process should start with the same PID
-// as long as we're still holding a handle to it.
-static void CheckForTerminatedRealtimeProcesses(std::vector<std::pair<uint32_t, uint64_t>>* terminatedProcesses)
+static void UpdateProcessEvents(
+    PMTraceConsumer* pmConsumer,
+    std::vector<ProcessEvent>* processEvents)
 {
+    std::vector<ProcessEvent> newProcessEvents;
+    pmConsumer->DequeueProcessEvents(newProcessEvents);
+
+    if (!newProcessEvents.empty()) {
+        processEvents->insert(processEvents->end(), newProcessEvents.begin(), newProcessEvents.end());
+        newProcessEvents.clear();
+        newProcessEvents.shrink_to_fit();
+
+        std::sort(processEvents->begin(), processEvents->end(), [](ProcessEvent const& a, ProcessEvent const& b) { return a.QpcTime < b.QpcTime; });
+    }
+
+    // Check if any realtime processes terminated and create process events for them.
+    //
+    // We assume that the process terminated now, which is wrong but conservative and functionally
+    // ok because no other process should start with the same PID as long as we're still holding a
+    // handle to it.
     for (auto& pair : gProcesses) {
         auto processId = pair.first;
         auto processInfo = &pair.second;
@@ -183,339 +205,401 @@ static void CheckForTerminatedRealtimeProcesses(std::vector<std::pair<uint32_t, 
         DWORD exitCode = 0;
         if (processInfo->mHandle != NULL && GetExitCodeProcess(processInfo->mHandle, &exitCode) && exitCode != STILL_ACTIVE) {
             uint64_t qpc = 0;
-            QueryPerformanceCounter((LARGE_INTEGER*)&qpc);
-            terminatedProcesses->emplace_back(processId, qpc);
+            QueryPerformanceCounter((LARGE_INTEGER*) &qpc);
+
+            ProcessEvent e;
+            e.ImageFileName = processInfo->mModuleName;
+            e.QpcTime       = qpc;
+            e.ProcessId     = processId;
+            e.IsStartEvent  = false;
+            processEvents->push_back(e);
+
             CloseHandle(processInfo->mHandle);
             processInfo->mHandle = NULL;
         }
     }
 }
 
-static void HandleTerminatedProcess(uint32_t processId)
+static void UpdateAverage(float* avg, double value)
 {
-    auto const& args = GetCommandLineArgs();
+    float constexpr expAvgScale = 0.0165f; // similar result to 120-present moving average
 
-    auto iter = gProcesses.find(processId);
-    if (iter == gProcesses.end()) {
-        return; // shouldn't happen.
+    if (value == 0.0) {
+        *avg = 0.f;
+    } else if (*avg == 0.f) {
+        *avg = float(value);
+    } else {
+        *avg = (1.f - expAvgScale) * *avg + expAvgScale * float(value);
     }
-
-    auto processInfo = &iter->second;
-    if (processInfo->mTargetProcess) {
-        // Close this process' CSV.
-        CloseOutputCsv(processInfo);
-
-        // Quit if this is the last process tracked for -terminate_on_proc_exit.
-        gTargetProcessCount -= 1;
-        if (args.mTerminateOnProcExit && gTargetProcessCount == 0) {
-            LOGI("No more process to track.");
-            ExitMainThread();
-        }
-    }
-
-    gProcesses.erase(iter);
 }
 
-static void UpdateProcesses(std::vector<ProcessEvent> const& processEvents, std::vector<std::pair<uint32_t, uint64_t>>* terminatedProcesses)
+static void UpdateChain(
+    SwapChainData* chain,
+    PresentEvent const& p)
 {
-    for (auto const& processEvent : processEvents) {
-        if (processEvent.IsStartEvent) {
-            // This event is a new process starting, the pid should not already be
-            // in gProcesses.
-            auto result = gProcesses.emplace(processEvent.ProcessId, ProcessInfo());
-            auto processInfo = &result.first->second;
-            auto newProcess = result.second;
-            if (newProcess) {
-                InitProcessInfo(processInfo, processEvent.ProcessId, NULL, processEvent.ImageFileName);
+    chain->mNextFrameCPUStart   = p.PresentStartTime + p.TimeInPresent;
+    chain->mPresentMode         = p.PresentMode;
+    chain->mPresentRuntime      = p.Runtime;
+    chain->mPresentSyncInterval = p.SyncInterval;
+    chain->mPresentFlags        = p.PresentFlags;
+    chain->mPresentInfoValid    = true;
+
+    // v1
+    chain->mLastPresentStartTime = p.PresentStartTime;
+    if (p.FinalState == PresentResult::Presented) {
+        chain->mLastDisplayedScreenTime = p.ScreenTime;
+    }
+}
+
+static void ReportMetrics1(
+    PMTraceSession const& pmSession,
+    ProcessInfo* processInfo,
+    SwapChainData* chain,
+    PresentEvent const& p,
+    bool isRecording,
+    bool computeAvg)
+{
+    bool displayed = p.FinalState == PresentResult::Presented;
+
+    FrameMetrics1 metrics;
+    metrics.msBetweenPresents      = !chain->mPresentInfoValid ? 0 : pmSession.TimestampDeltaToUnsignedMilliSeconds(chain->mLastPresentStartTime, p.PresentStartTime);
+    metrics.msInPresentApi         = pmSession.TimestampDeltaToMilliSeconds(p.TimeInPresent);
+    metrics.msUntilRenderComplete  = pmSession.TimestampDeltaToMilliSeconds(p.PresentStartTime, p.ReadyTime);
+    metrics.msUntilDisplayed       = !displayed ? 0 : pmSession.TimestampDeltaToUnsignedMilliSeconds(p.PresentStartTime, p.ScreenTime);
+    metrics.msBetweenDisplayChange = !displayed || chain->mLastDisplayedScreenTime == 0 ? 0 : pmSession.TimestampDeltaToUnsignedMilliSeconds(chain->mLastDisplayedScreenTime, p.ScreenTime);
+    metrics.msUntilRenderStart     = pmSession.TimestampDeltaToMilliSeconds(p.PresentStartTime, p.GPUStartTime);
+    metrics.msGPUDuration          = pmSession.TimestampDeltaToMilliSeconds(p.GPUDuration);
+    metrics.msVideoDuration        = pmSession.TimestampDeltaToMilliSeconds(p.GPUVideoDuration);
+    metrics.msSinceInput           = p.InputTime == 0 ? 0 : pmSession.TimestampDeltaToMilliSeconds(p.PresentStartTime - p.InputTime);
+
+    if (isRecording) {
+        UpdateCsv(pmSession, processInfo, p, metrics);
+    }
+
+    if (computeAvg) {
+        UpdateAverage(&chain->mAvgCPUDuration, metrics.msBetweenPresents);
+        UpdateAverage(&chain->mAvgGPUDuration, metrics.msGPUDuration);
+        if (metrics.msUntilDisplayed > 0) {
+            UpdateAverage(&chain->mAvgDisplayLatency, metrics.msUntilDisplayed);
+            if (metrics.msBetweenDisplayChange > 0) {
+                UpdateAverage(&chain->mAvgDisplayedTime, metrics.msBetweenDisplayChange);
             }
         }
-        else {
-            // Note any process termination in terminatedProcess, to be handled
-            // once the present event stream catches up to the termination time.
-            terminatedProcesses->emplace_back(processEvent.ProcessId, processEvent.QpcTime);
-        }
-    }
-}
-
-static void AddPresents(std::vector<std::shared_ptr<PresentEvent>> const& presentEvents, size_t* presentEventIndex,
-    bool recording, bool checkStopQpc, uint64_t stopQpc, bool* hitStopQpc)
-{
-    auto i = *presentEventIndex;
-    for (auto n = presentEvents.size(); i < n; ++i) {
-        auto presentEvent = presentEvents[i];
-        assert(presentEvent->Completed);
-
-        // Stop processing events if we hit the next stop time.
-        if (checkStopQpc && presentEvent->QpcTime >= stopQpc) {
-            *hitStopQpc = true;
-            break;
-        }
-
-        // Look up the swapchain this present belongs to.
-        auto processInfo = GetProcessInfo(presentEvent->ProcessId);
-        if (!processInfo->mTargetProcess) {
-            continue;
-        }
-
-        auto result = processInfo->mSwapChain.emplace(presentEvent->SwapChainAddress, SwapChainData());
-        auto chain = &result.first->second;
-        if (result.second) {
-            chain->mPresentHistoryCount = 0;
-            chain->mNextPresentIndex = 1; // Start at 1 so that mLastDisplayedPresentIndex starts out invalid.
-            chain->mLastDisplayedPresentIndex = 0;
-        }
-
-        // Output CSV row if recording (need to do this before updating chain).
-        if (recording) {
-            UpdateCsv(processInfo, *chain, *presentEvent);
-            UpdateStatsd(processInfo, *chain, *presentEvent);
-        }
-
-        // Add the present to the swapchain history.
-        chain->mPresentHistory[chain->mNextPresentIndex % SwapChainData::PRESENT_HISTORY_MAX_COUNT] = presentEvent;
-
-        if (presentEvent->FinalState == PresentResult::Presented) {
-            chain->mLastDisplayedPresentIndex = chain->mNextPresentIndex;
-        }
-        else if (chain->mLastDisplayedPresentIndex == chain->mNextPresentIndex) {
-            chain->mLastDisplayedPresentIndex = 0;
-        }
-
-        chain->mNextPresentIndex += 1;
-        if (chain->mPresentHistoryCount < SwapChainData::PRESENT_HISTORY_MAX_COUNT) {
-            chain->mPresentHistoryCount += 1;
-        }
     }
 
-    *presentEventIndex = i;
+    UpdateChain(chain, p);
 }
 
-static void AddPresents(LateStageReprojectionData* lsrData,
-    std::vector<std::shared_ptr<LateStageReprojectionEvent>> const& presentEvents, size_t* presentEventIndex,
-    bool recording, bool checkStopQpc, uint64_t stopQpc, bool* hitStopQpc)
+static void ReportMetrics(
+    PMTraceSession const& pmSession,
+    ProcessInfo* processInfo,
+    SwapChainData* chain,
+    PresentEvent const& p,
+    PresentEvent const* nextDisplayedPresent,
+    bool isRecording,
+    bool computeAvg)
 {
-    auto const& args = GetCommandLineArgs();
+    // PB = PresentStartTime
+    // PE = PresentEndTime
+    // D  = ScreenTime
+    //
+    // Previous PresentEvent:  PB--PE----D
+    // p:                          |        PB--PE----D
+    // Next PresentEvent(s):       |        |   |   PB--PE
+    //                             |        |   |     |     PB--PE
+    // nextDisplayedPresent:       |        |   |     |             PB--PE----D
+    //                             |        |   |     |                       |
+    // CPUStartTime/CPUBusy:       |------->|   |     |                       |
+    // CPUWait:                             |-->|     |                       |
+    // DisplayLatency:             |----------------->|                       |
+    // DisplayedTime:                                 |---------------------->|
 
-    auto i = *presentEventIndex;
-    for (auto n = presentEvents.size(); i < n; ++i) {
-        auto presentEvent = presentEvents[i];
-        assert(presentEvent->Completed);
-        assert(presentEvent->Source.pHolographicFrame == nullptr ||
-            presentEvent->Source.pHolographicFrame->Completed);
+    bool displayed = p.FinalState == PresentResult::Presented;
 
-        // Stop processing events if we hit the next stop time.
-        if (checkStopQpc && presentEvent->QpcTime >= stopQpc) {
-            *hitStopQpc = true;
-            break;
-        }
+    double gpuDuration = pmSession.TimestampDeltaToUnsignedMilliSeconds(p.GPUStartTime, p.ReadyTime);
 
-        const uint32_t appProcessId = presentEvent->GetAppProcessId();
-        auto processInfo = GetProcessInfo(appProcessId);
-        if (!processInfo->mTargetProcess) {
-            continue;
-        }
+    FrameMetrics metrics;
+    metrics.mCPUStart             = chain->mNextFrameCPUStart;
+    metrics.mCPUBusy              = pmSession.TimestampDeltaToUnsignedMilliSeconds(metrics.mCPUStart, p.PresentStartTime);
+    metrics.mCPUWait              = pmSession.TimestampDeltaToMilliSeconds(p.TimeInPresent);
+    metrics.mGPULatency           = pmSession.TimestampDeltaToUnsignedMilliSeconds(metrics.mCPUStart, p.GPUStartTime);
+    metrics.mGPUBusy              = pmSession.TimestampDeltaToMilliSeconds(p.GPUDuration);
+    metrics.mVideoBusy            = pmSession.TimestampDeltaToMilliSeconds(p.GPUVideoDuration);
+    metrics.mGPUWait              = std::max(0.0, gpuDuration - metrics.mGPUBusy);
+    metrics.mDisplayLatency       = !displayed       ? 0 : pmSession.TimestampDeltaToUnsignedMilliSeconds(metrics.mCPUStart, p.ScreenTime);
+    metrics.mDisplayedTime        = !displayed       ? 0 : pmSession.TimestampDeltaToUnsignedMilliSeconds(p.ScreenTime, nextDisplayedPresent->ScreenTime);
+    metrics.mClickToPhotonLatency = p.InputTime == 0 ? 0 : pmSession.TimestampDeltaToUnsignedMilliSeconds(p.InputTime, p.ScreenTime);
 
-        if (args.mTrackDisplay && (appProcessId == 0)) {
-            continue; // Incomplete event data
-        }
-
-        lsrData->AddLateStageReprojection(*presentEvent);
-
-        if (recording) {
-            UpdateLsrCsv(*lsrData, processInfo, *presentEvent);
-        }
-
-        lsrData->UpdateLateStageReprojectionInfo();
+    if (isRecording) {
+        UpdateCsv(pmSession, processInfo, p, metrics);
     }
 
-    *presentEventIndex = i;
+    if (computeAvg) {
+        UpdateAverage(&chain->mAvgCPUDuration, metrics.mCPUBusy + metrics.mCPUWait);
+        UpdateAverage(&chain->mAvgGPUDuration, gpuDuration);
+        if (displayed) {
+            UpdateAverage(&chain->mAvgDisplayLatency, metrics.mDisplayLatency);
+            UpdateAverage(&chain->mAvgDisplayedTime, metrics.mDisplayedTime);
+        }
+    }
+
+    UpdateChain(chain, p);
 }
 
-// Limit the present history stored in SwapChainData to 2 seconds.
-static void PruneHistory(
-    std::vector<ProcessEvent> const& processEvents,
-    std::vector<std::shared_ptr<PresentEvent>> const& presentEvents,
-    std::vector<std::shared_ptr<LateStageReprojectionEvent>> const& lsrEvents)
+static void PruneOldSwapChainData(
+    PMTraceSession const& pmSession,
+    uint64_t latestTimestamp)
 {
-    assert(processEvents.size() + presentEvents.size() + lsrEvents.size() > 0);
-
-    auto latestQpc = max(max(
-        processEvents.empty() ? 0ull : processEvents.back().QpcTime,
-        presentEvents.empty() ? 0ull : presentEvents.back()->QpcTime),
-        lsrEvents.empty() ? 0ull : lsrEvents.back()->QpcTime);
-
-    auto minQpc = latestQpc - SecondsDeltaToQpc(2.0);
+    auto minTimestamp = latestTimestamp - pmSession.MilliSecondsDeltaToTimestamp(4000.0);
 
     for (auto& pair : gProcesses) {
         auto processInfo = &pair.second;
-        for (auto& pair2 : processInfo->mSwapChain) {
-            auto swapChain = &pair2.second;
+        for (auto ii = processInfo->mSwapChain.begin(), ie = processInfo->mSwapChain.end(); ii != ie; ) {
+            auto chain = &ii->second;
+            if (chain->mNextFrameCPUStart < minTimestamp) {
+                ii = processInfo->mSwapChain.erase(ii);
+            } else {
+                ++ii;
+            }
+        }
+    }
+}
 
-            auto count = swapChain->mPresentHistoryCount;
-            for (; count > 0; --count) {
-                auto index = swapChain->mNextPresentIndex - count;
-                auto const& presentEvent = swapChain->mPresentHistory[index % SwapChainData::PRESENT_HISTORY_MAX_COUNT];
-                if (presentEvent->QpcTime >= minQpc) {
-                    break;
-                }
-                if (index == swapChain->mLastDisplayedPresentIndex) {
-                    swapChain->mLastDisplayedPresentIndex = 0;
+static void QueryProcessName(uint32_t processId, ProcessInfo* info)
+{
+    auto const& args = GetCommandLineArgs();
+
+    wchar_t path[MAX_PATH];
+    wchar_t* processName = L"<unknown>";
+    HANDLE handle = NULL;
+
+    if (args.mEtlFileName == nullptr) {
+        handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+        if (handle != NULL) {
+            DWORD numChars = _countof(path);
+            if (QueryFullProcessImageNameW(handle, 0, path, &numChars)) {
+                for (;; --numChars) {
+                    if (numChars == 0 || path[numChars - 1] == L'\\' || path[numChars - 1] == L'/') {
+                        processName = &path[numChars];
+                        break;
+                    }
                 }
             }
-
-            swapChain->mPresentHistoryCount = count;
         }
+    }
+
+    info->mModuleName = processName;
+    info->mHandle     = handle;
+}
+
+static bool GetPresentProcessInfo(
+    PresentEvent const& presentEvent,
+    bool create,
+    ProcessInfo** outProcessInfo,
+    SwapChainData** outChain,
+    uint64_t* outPresentTime)
+{
+    ProcessInfo* processInfo;
+    auto ii = gProcesses.find(presentEvent.ProcessId);
+    if (ii != gProcesses.end()) {
+        processInfo = &ii->second;
+    } else {
+        if (!create) {
+            *outProcessInfo = nullptr;
+            *outChain       = nullptr;
+            *outPresentTime = presentEvent.PresentStartTime;
+            return false;
+        }
+
+        ProcessInfo info;
+        QueryProcessName(presentEvent.ProcessId, &info);
+        info.mOutputCsv       = nullptr;
+        info.mIsTargetProcess = IsTargetProcess(presentEvent.ProcessId, info.mModuleName);
+        if (info.mIsTargetProcess) {
+            gTargetProcessCount += 1;
+        }
+
+        processInfo = &gProcesses.emplace(presentEvent.ProcessId, info).first->second;
+    }
+
+    if (!processInfo->mIsTargetProcess) {
+        return true;
+    }
+
+    auto chain = &processInfo->mSwapChain[presentEvent.SwapChainAddress];
+    if (!chain->mPresentInfoValid) {
+        UpdateChain(chain, presentEvent);
+        return true;
+    }
+
+    *outProcessInfo = processInfo;
+    *outChain       = chain;
+    *outPresentTime = chain->mNextFrameCPUStart;
+    return false;
+}
+
+static void ProcessRecordingToggle(
+    bool* isRecording)
+{
+    auto const& args = GetCommandLineArgs();
+
+    if (*isRecording) {
+        *isRecording = false;
+
+        IncrementRecordingCount();
+
+        if (args.mMultiCsv) {
+            for (auto& pair : gProcesses) {
+                CloseMultiCsv(&pair.second);
+            }
+        } else {
+            CloseGlobalCsv();
+        }
+    } else {
+        *isRecording = true;
     }
 }
 
 static void ProcessEvents(
-    LateStageReprojectionData* lsrData,
+    PMTraceSession const& pmSession,
+    std::vector<std::shared_ptr<PresentEvent>> const& presentEvents,
     std::vector<ProcessEvent>* processEvents,
-    std::vector<std::shared_ptr<PresentEvent>>* presentEvents,
-    std::vector<std::shared_ptr<PresentEvent>>* lostPresentEvents,
-    std::vector<std::shared_ptr<LateStageReprojectionEvent>>* lsrEvents,
     std::vector<uint64_t>* recordingToggleHistory,
-    std::vector<std::pair<uint32_t, uint64_t>>* terminatedProcesses)
+    bool currentRecordingState)
 {
     auto const& args = GetCommandLineArgs();
+    auto computeAvg = args.mConsoleOutput == ConsoleOutput::Statistics;
 
-    // Copy any analyzed information from ConsumerThread and early-out if there
-    // isn't any.
-    DequeueAnalyzedInfo(processEvents, presentEvents, lostPresentEvents, lsrEvents);
-    if (processEvents->empty() && presentEvents->empty() && lsrEvents->empty()) {
-        return;
-    }
-
-    // Copy the record range history form the MainThread.
-    auto recording = CopyRecordingToggleHistory(recordingToggleHistory);
-
-    // Handle Process events; created processes are added to gProcesses and
-    // terminated processes are added to terminatedProcesses.
-    //
-    // Handling of terminated processes need to be deferred until we observe a
-    // present event that started after the termination time.  This is because
-    // while a present must start before termination, it can complete after
-    // termination.
-    //
-    // We don't have to worry about the recording toggles here because
-    // NTProcess events are only captured when parsing ETL files and we don't
-    // use recording toggle history for ETL files.
-    UpdateProcesses(*processEvents, terminatedProcesses);
-
-    // Next, iterate through the recording toggles (if any)...
-    size_t presentEventIndex = 0;
-    size_t lsrEventIndex = 0;
+    // Determine the recording state and when the next toggle is.
     size_t recordingToggleIndex = 0;
-    size_t terminatedProcessIndex = 0;
-    for (;;) {
-        auto checkRecordingToggle = recordingToggleIndex < recordingToggleHistory->size();
-        auto nextRecordingToggleQpc = checkRecordingToggle ? (*recordingToggleHistory)[recordingToggleIndex] : 0ull;
-        auto hitNextRecordingToggle = false;
+    size_t recordingToggleCount = recordingToggleHistory->size();
+    bool checkRecordingToggle   = recordingToggleCount > 0;
+    bool isRecording            = recordingToggleCount & 1 ? !currentRecordingState : currentRecordingState;
 
-        // First iterate through the terminated process history up until the
-        // next recording toggle.  If we hit a present that started after the
-        // termination, we can handle the process termination and continue.
-        // Otherwise, we're done handling all the presents and any outstanding
-        // terminations will have to wait for the next batch of events.
-        for (; terminatedProcessIndex < terminatedProcesses->size(); ++terminatedProcessIndex) {
-            auto const& pair = (*terminatedProcesses)[terminatedProcessIndex];
-            auto terminatedProcessId = pair.first;
-            auto terminatedProcessQpc = pair.second;
+    // Determine if there are process events to check.
+    size_t processEventIndex = 0;
+    size_t processEventCount = processEvents->size();
+    bool   checkProcessTime  = processEventCount > 0;
 
-            if (checkRecordingToggle && nextRecordingToggleQpc < terminatedProcessQpc) {
-                break;
-            }
+    // Iterate through the processEvents, handling process events and recording toggles along the
+    // way.
+    uint64_t presentTime = 0;
+    for (auto const& presentEvent : presentEvents) {
 
-            auto hitTerminatedProcess = false;
-            AddPresents(*presentEvents, &presentEventIndex, recording, true, terminatedProcessQpc, &hitTerminatedProcess);
-            AddPresents(lsrData, *lsrEvents, &lsrEventIndex, recording, true, terminatedProcessQpc, &hitTerminatedProcess);
-            if (!hitTerminatedProcess) {
-                goto done;
-            }
-            HandleTerminatedProcess(terminatedProcessId);
+        // Look up the process this present belongs to.  If the process info doesn't exist yet,
+        // handle process events first and then check again.  
+        ProcessInfo* processInfo = nullptr;
+        SwapChainData* chain = nullptr;
+        if (GetPresentProcessInfo(*presentEvent, false, &processInfo, &chain, &presentTime)) {
+            continue;
         }
 
-        // Process present events up until the next recording toggle.  If we
-        // reached the toggle, handle it and continue.  Otherwise, we're done
-        // handling all the presents and any outstanding toggles will have to
-        // wait for next batch of events.
-        AddPresents(*presentEvents, &presentEventIndex, recording, checkRecordingToggle, nextRecordingToggleQpc, &hitNextRecordingToggle);
-        AddPresents(lsrData, *lsrEvents, &lsrEventIndex, recording, checkRecordingToggle, nextRecordingToggleQpc, &hitNextRecordingToggle);
-        if (!hitNextRecordingToggle) {
-            break;
+        // Handle any process events that occurred before this present
+        if (checkProcessTime) {
+            while ((*processEvents)[processEventIndex].QpcTime < presentTime) {
+                ProcessProcessEvent((*processEvents)[processEventIndex]);
+                processEventIndex += 1;
+                if (processEventIndex == processEventCount) {
+                    checkProcessTime = false;
+                    break;
+                }
+            }
         }
 
-        // Toggle recording.
-        recordingToggleIndex += 1;
-        recording = !recording;
-        if (!recording) {
-            IncrementRecordingCount();
-            CloseOutputCsv(nullptr);
-            for (auto& pair : gProcesses) {
-                CloseOutputCsv(&pair.second);
+        // Handle any recording toggles that occurred before this present
+        if (checkRecordingToggle) {
+            while ((*recordingToggleHistory)[recordingToggleIndex] < presentTime) {
+                ProcessRecordingToggle(&isRecording);
+                recordingToggleIndex += 1;
+                if (recordingToggleIndex == recordingToggleCount) {
+                    checkRecordingToggle = false;
+                    break;
+                }
             }
+        }
+
+        // If we didn't get process info, try again (this time querying realtime data if needed).
+        if (processInfo == nullptr && GetPresentProcessInfo(*presentEvent, true, &processInfo, &chain, &presentTime)) {
+            continue;
+        }
+
+        // If we are recording or presenting metrics to console and the chain is initialized, then
+        // update the metrics and pending presents.  Otherwise, just update the latest present
+        // details in the chain.
+        //
+        // The only time there will be existing pending presents is if the first one was displayed
+        // and we are waiting for the next displayed present to compute DisplayBusy.
+        if (isRecording || computeAvg) {
+            if (args.mUseV1Metrics) {
+                ReportMetrics1(pmSession, processInfo, chain, *presentEvent, isRecording, computeAvg);
+            } else {
+                if (presentEvent->FinalState == PresentResult::Presented) {
+                    for (auto pp : chain->mPendingPresents) {
+                        ReportMetrics(pmSession, processInfo, chain, *pp, presentEvent.get(), isRecording, computeAvg);
+                    }
+                    chain->mPendingPresents.clear();
+                    chain->mPendingPresents.push_back(presentEvent);
+                } else {
+                    if (chain->mPendingPresents.empty()) {
+                        ReportMetrics(pmSession, processInfo, chain, *presentEvent, nullptr, isRecording, computeAvg);
+                    } else {
+                        chain->mPendingPresents.push_back(presentEvent);
+                    }
+                }
+            }
+        } else {
+            UpdateChain(chain, *presentEvent);
         }
     }
 
-done:
+    // Prune any SwapChainData that hasn't seen an update for over 4 seconds.
+    PruneOldSwapChainData(pmSession, presentTime);
 
-    // Limit the present history stored in SwapChainData to 2 seconds, so that
-    // processes that stop presenting are removed from the console display.
-    // This only applies to ConsoleOutput::Full, otherwise it's ok to just
-    // leave the older presents in the history buffer since they aren't used
-    // for anything.
-    if (args.mConsoleOutputType == ConsoleOutput::Full) {
-        PruneHistory(*processEvents, *presentEvents, *lsrEvents);
+    // Erase any recording toggles and process events that were processed.
+    if (recordingToggleIndex > 0) {
+        recordingToggleHistory->erase(recordingToggleHistory->begin(), recordingToggleHistory->begin() + recordingToggleIndex);
     }
-
-    // Clear events processed.
-    processEvents->clear();
-    presentEvents->clear();
-    lostPresentEvents->clear();
-    lsrEvents->clear();
-    recordingToggleHistory->clear();
-
-    // Finished processing all events.  Erase the recording toggles and
-    // terminated processes that we also handled now.
-    UpdateRecordingToggles(recordingToggleIndex);
-    if (terminatedProcessIndex > 0) {
-        terminatedProcesses->erase(terminatedProcesses->begin(), terminatedProcesses->begin() + terminatedProcessIndex);
-    }
-
-    if (DebugDone()) {
-        ExitMainThread();
+    if (processEventIndex > 0) {
+        processEvents->erase(processEvents->begin(), processEvents->begin() + processEventIndex);
     }
 }
 
-void Output()
+void Output(PMTraceSession const* pmSession)
 {
-#if !DEBUG_VERBOSE
+    SetThreadDescription(GetCurrentThread(), L"PresentMon Output Thread");
+
     auto const& args = GetCommandLineArgs();
-#endif
 
     // Structures to track processes and statistics from recorded events.
-    LateStageReprojectionData lsrData;
+    std::vector<uint64_t> recordingToggleHistory;
     std::vector<ProcessEvent> processEvents;
     std::vector<std::shared_ptr<PresentEvent>> presentEvents;
-    std::vector<std::shared_ptr<PresentEvent>> lostPresentEvents;
-    std::vector<std::shared_ptr<LateStageReprojectionEvent>> lsrEvents;
-    std::vector<uint64_t> recordingToggleHistory;
-    std::vector<std::pair<uint32_t, uint64_t>> terminatedProcesses;
     processEvents.reserve(128);
     presentEvents.reserve(4096);
-    lsrEvents.reserve(4096);
-    recordingToggleHistory.reserve(16);
-    terminatedProcesses.reserve(16);
 
     for (;;) {
         // Read gQuit here, but then check it after processing queued events.
-        // This ensures that we call DequeueAnalyzedInfo() at least once after
+        // This ensures that we call Dequeue*() at least once after
         // events have stopped being collected so that all events are included.
         auto quit = gQuit;
 
-        // Copy and process all the collected events, and update the various
-        // tracking and statistics data structures.
-        ProcessEvents(&lsrData, &processEvents, &presentEvents, &lostPresentEvents, &lsrEvents, &recordingToggleHistory, &terminatedProcesses);
+        // Copy recording toggle history from MainThread
+        bool currentRecordingState = CopyRecordingToggleHistory(&recordingToggleHistory);
+
+        // Copy process events, present events, and lost present events from ConsumerThread.
+        UpdateProcessEvents(pmSession->mPMConsumer, &processEvents);
+        pmSession->mPMConsumer->DequeuePresentEvents(presentEvents);
+        {
+            std::vector<std::shared_ptr<PresentEvent>> lostPresentEvents;
+            pmSession->mPMConsumer->DequeueLostPresentEvents(lostPresentEvents);
+        }
+
+        // Process all the collected events, and update the various tracking
+        // and statistics data structures.
+        if (!presentEvents.empty()) {
+            ProcessEvents(*pmSession, presentEvents, &processEvents, &recordingToggleHistory, currentRecordingState);
+            presentEvents.clear();
+        }
 
         // Display information to console if requested.  If debug build and
         // simple console, print a heartbeat if recording.
@@ -523,31 +607,28 @@ void Output()
         // gIsRecording is the real timeline recording state.  Because we're
         // just reading it without correlation to gRecordingToggleHistory, we
         // don't need the critical section.
-#if !DEBUG_VERBOSE
-        auto realtimeRecording = gIsRecording;
-        switch (args.mConsoleOutputType) {
-        case ConsoleOutput::None:
-            break;
+        switch (args.mConsoleOutput) {
+        #if _DEBUG
         case ConsoleOutput::Simple:
-#if _DEBUG
-            if (realtimeRecording) {
-                printf(".");
+            if (currentRecordingState && args.mCSVOutput != CSVOutput::None) {
+                wprintf(L".");
             }
-#endif
             break;
-        case ConsoleOutput::Full:
-            for (auto const& pair : gProcesses) {
-                UpdateConsole(pair.first, pair.second);
-            }
-            UpdateConsole(gProcesses, lsrData);
+        #endif
+        case ConsoleOutput::Statistics:
+            if (BeginConsoleUpdate()) {
+                for (auto const& pair : gProcesses) {
+                    UpdateConsole(pair.first, pair.second);
+                }
 
-            if (realtimeRecording) {
-                ConsolePrintLn("** RECORDING **");
+                if (currentRecordingState && args.mCSVOutput != CSVOutput::None) {
+                    ConsolePrintLn(L"** RECORDING **");
+                }
+
+                EndConsoleUpdate();
             }
-            CommitConsole();
             break;
         }
-#endif
 
         // Everything is processed and output out at this point, so if we're
         // quiting we don't need to update the rest.
@@ -555,22 +636,8 @@ void Output()
             break;
         }
 
-        // Update tracking information.
-        CheckForTerminatedRealtimeProcesses(&terminatedProcesses);
-
         // Sleep to reduce overhead.
         Sleep(100);
-    }
-
-    // Output warning if events were lost.
-    ULONG eventsLost = 0;
-    ULONG buffersLost = 0;
-    CheckLostReports(&eventsLost, &buffersLost);
-    if (buffersLost > 0) {
-        fprintf(stderr, "warning: %lu ETW buffers were lost.\n", buffersLost);
-    }
-    if (eventsLost > 0) {
-        fprintf(stderr, "warning: %lu ETW events were lost.\n", eventsLost);
     }
 
     // Close all CSV and process handles
@@ -579,18 +646,21 @@ void Output()
         if (processInfo->mHandle != NULL) {
             CloseHandle(processInfo->mHandle);
         }
-        CloseOutputCsv(processInfo);
+        CloseMultiCsv(processInfo);
     }
+    CloseGlobalCsv();
+
     gProcesses.clear();
-    CloseOutputCsv(nullptr); // Special case to close single global CSV if not
-                             // using per-process CSVs.
+
+    gRecordingToggleHistory.clear();
+    gRecordingToggleHistory.shrink_to_fit();
 }
 
-void StartOutputThread()
+void StartOutputThread(PMTraceSession const& pmSession)
 {
     InitializeCriticalSection(&gRecordingToggleCS);
-
-    gThread = std::thread(Output);
+    gQuit = false;
+    gThread = std::thread(Output, &pmSession); // Doesn't work to pass a reference, it makes a copy
 }
 
 void StopOutputThread()

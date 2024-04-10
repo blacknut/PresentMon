@@ -1,4 +1,4 @@
-// Copyright (C) 2017,2019-2021 Intel Corporation
+// Copyright (C) 2017,2019-2023 Intel Corporation
 // SPDX-License-Identifier: MIT
 
 #pragma once
@@ -26,93 +26,143 @@ collected data is written to the CSV file(s) is controlled by a recording state
 which is controlled from MainThread based on user input or timer.
 */
 
-#include "../PresentData/MixedRealityTraceConsumer.hpp"
 #include "../PresentData/PresentMonTraceConsumer.hpp"
+#include "../PresentData/PresentMonTraceSession.hpp"
 
 #include <unordered_map>
 
+// Verbosity of console output for normal operation:
 enum class ConsoleOutput {
-    None,
-    Simple,
-    Full
+    None,      // no output
+    Simple,    // commands such as recording start/stop
+    Statistics // statistics about captured presents
+};
+
+// Optional units to use for time-based metrics metric
+enum class TimeUnit {
+    MilliSeconds,       // Milliseconds since recording began
+    QPC,                // QueryPerformanceCounter value
+    QPCMilliSeconds,    // QueryPerformanceCounter value converted into milliseconds
+    DateTime,           // Date and time
+};
+
+// How to ouput per-frame metrics
+enum class CSVOutput {
+    None,   // Don't
+    File,   // To a CSV file
+    Stdout  // To STDOUT in CSV format
 };
 
 struct CommandLineArgs {
-    std::vector<const char*> mTargetProcessNames;
-    std::vector<const char*> mExcludeProcessNames;
-    const char* mOutputCsvFileName;
-    const char* mEtlFileName;
-    const char* mSessionName;
+    std::vector<std::wstring> mTargetProcessNames;
+    std::vector<std::wstring> mExcludeProcessNames;
+    const wchar_t *mOutputCsvFileName;
+    const wchar_t *mEtlFileName;
+    const wchar_t *mSessionName;
     UINT mTargetPid;
     UINT mDelay;
     UINT mTimer;
     UINT mHotkeyModifiers;
     UINT mHotkeyVirtualKeyCode;
-    UINT mOutputStatsdPort; // For Blacknut
-    ConsoleOutput mConsoleOutputType;
+    TimeUnit mTimeUnit;
+    CSVOutput mCSVOutput;
+    ConsoleOutput mConsoleOutput;
     bool mTrackDisplay;
-    bool mTrackDebug;
-    bool mTrackWMR;
-    bool mOutputCsvToFile;
-    bool mOutputCsvToStdout;
-    bool mOutputQpcTime;
-    bool mOutputQpcTimeInSeconds;
+    bool mTrackInput;
+    bool mTrackGPU;
+    bool mTrackGPUVideo;
     bool mScrollLockIndicator;
     bool mExcludeDropped;
-    bool mTerminateExisting;
+    bool mTerminateExistingSession;
     bool mTerminateOnProcExit;
     bool mStartTimer;
     bool mTerminateAfterTimer;
     bool mHotkeySupport;
     bool mTryToElevate;
     bool mMultiCsv;
+    bool mUseV1Metrics;
     bool mStopExistingSession;
-    const char* mLogFile;
+    // blk additions
+    UINT mStatsdPort;
+    const wchar_t* mLogFilename;
 };
 
-// CSV output only requires last presented/displayed event to compute frame
-// information, but if outputing to the console we maintain a longer history of
-// presents to compute averages, limited to 120 events (2 seconds @ 60Hz) to
-// reduce memory/compute overhead.
+// Metrics computed per-frame.  Duration and Latency metrics are in milliseconds.
+struct FrameMetrics {
+    uint64_t mCPUStart;
+    double mCPUBusy;
+    double mCPUWait;
+    double mGPULatency;
+    double mGPUBusy;
+    double mVideoBusy;
+    double mGPUWait;
+    double mDisplayLatency;
+    double mDisplayedTime;
+    double mClickToPhotonLatency;
+};
+
+struct FrameMetrics1 {
+    double msBetweenPresents;
+    double msInPresentApi;
+    double msUntilRenderComplete;
+    double msUntilDisplayed;
+    double msBetweenDisplayChange;
+    double msUntilRenderStart;
+    double msGPUDuration;
+    double msVideoDuration;
+    double msSinceInput;
+};
+
+// We store SwapChainData per process and per swapchain, where we maintain:
+// - information on previous presents needed for console output or to compute metrics for upcoming
+//   presents,
+// - pending presents whose metrics cannot be computed until future presents are received,
+// - exponential averages of key metrics displayed in console output.
 struct SwapChainData {
-    enum { PRESENT_HISTORY_MAX_COUNT = 120 };
-    std::shared_ptr<PresentEvent> mPresentHistory[PRESENT_HISTORY_MAX_COUNT];
-    uint32_t mPresentHistoryCount;
-    uint32_t mNextPresentIndex;
-    uint32_t mLastDisplayedPresentIndex;
-};
+    // Pending presents waiting for the next displayed present.
+    std::vector<std::shared_ptr<PresentEvent>> mPendingPresents;
 
-struct OutputCsv {
-    FILE* mFile;
-    FILE* mWmrFile;
-};
+    // Present info
+    uint64_t    mLastPresentStartTime = 0;
+    uint64_t    mLastDisplayedScreenTime = 0;
+    uint64_t    mNextFrameCPUStart = 0;
+    PresentMode mPresentMode = PresentMode::Unknown;
+    Runtime     mPresentRuntime = Runtime::Other;
+    int32_t     mPresentSyncInterval = 0;
+    uint32_t    mPresentFlags = 0;
+    bool        mPresentInfoValid = false;
 
-struct OutputStatsd {
-    SOCKET      mSocket;
-    SOCKADDR_IN mStatsdConnection;
+    // Frame statistics
+    float mAvgCPUDuration = 0.f;
+    float mAvgGPUDuration = 0.f;
+    float mAvgDisplayLatency = 0.f;
+    float mAvgDisplayedTime = 0.f;
 };
 
 struct ProcessInfo {
-    std::string mModuleName;
+    std::wstring mModuleName;
     std::unordered_map<uint64_t, SwapChainData> mSwapChain;
     HANDLE mHandle;
-    OutputCsv mOutputCsv;
-    OutputStatsd mOutputStatsd;
-    bool mTargetProcess;
+    FILE* mOutputCsv;
+    bool mIsTargetProcess;
 };
 
-#include "LateStageReprojectionData.hpp"
-
 // CommandLine.cpp:
-bool ParseCommandLine(int argc, char** argv);
+bool ParseCommandLine(int argc, wchar_t** argv);
 CommandLineArgs const& GetCommandLineArgs();
+void PrintHotkeyError();
 
 // Console.cpp:
-bool InitializeConsole();
-void ConsolePrint(char const* format, ...);
-void ConsolePrintLn(char const* format, ...);
-void CommitConsole();
+void InitializeConsole();
+void FinalizeConsole();
+bool StdOutIsConsole();
+bool BeginConsoleUpdate();
+void EndConsoleUpdate();
+void ConsolePrint(wchar_t const* format, ...);
+void ConsolePrintLn(wchar_t const* format, ...);
 void UpdateConsole(uint32_t processId, ProcessInfo const& processInfo);
+int PrintWarning(wchar_t const* format, ...);
+int PrintError(wchar_t const* format, ...);
 
 // ConsumerThread.cpp:
 void StartConsumerThread(TRACEHANDLE traceHandle);
@@ -120,42 +170,30 @@ void WaitForConsumerThreadToExit();
 
 // CsvOutput.cpp:
 void IncrementRecordingCount();
-OutputCsv GetOutputCsv(ProcessInfo* processInfo);
-void CloseOutputCsv(ProcessInfo* processInfo);
-void UpdateCsv(ProcessInfo* processInfo, SwapChainData const& chain, PresentEvent const& p);
-const char* FinalStateToDroppedString(PresentResult res);
+void CloseMultiCsv(ProcessInfo* processInfo);
+void CloseGlobalCsv();
 const char* PresentModeToString(PresentMode mode);
 const char* RuntimeToString(Runtime rt);
-
-// StatsdOutput.cpp:
-OutputStatsd GetOutputStatsd(ProcessInfo* processInfo);
-void UpdateStatsd(ProcessInfo* processInfo, SwapChainData const& chain, PresentEvent const& p);
+void UpdateCsv(PMTraceSession const& pmSession, ProcessInfo* processInfo, PresentEvent const& p, FrameMetrics const& metrics);
+void UpdateCsv(PMTraceSession const& pmSession, ProcessInfo* processInfo, PresentEvent const& p, FrameMetrics1 const& metrics);
 
 // MainThread.cpp:
 void ExitMainThread();
 
 // OutputThread.cpp:
-void StartOutputThread();
+void StartOutputThread(PMTraceSession const& pmSession);
 void StopOutputThread();
 void SetOutputRecordingState(bool record);
+void CanonicalizeProcessName(std::wstring* path);
 
 // Privilege.cpp:
 bool InPerfLogUsersGroup();
 bool EnableDebugPrivilege();
-int RestartAsAdministrator(int argc, char** argv);
+int RestartAsAdministrator(int argc, wchar_t** argv);
 
-// TraceSession.cpp:
-bool StartTraceSession();
-void StopTraceSession();
-void CheckLostReports(ULONG* eventsLost, ULONG* buffersLost);
-void DequeueAnalyzedInfo(
-    std::vector<ProcessEvent>* processEvents,
-    std::vector<std::shared_ptr<PresentEvent>>* presentEvents,
-    std::vector<std::shared_ptr<PresentEvent>>* lostPresentEvents,
-    std::vector<std::shared_ptr<LateStageReprojectionEvent>>* lsrs);
-double QpcDeltaToSeconds(uint64_t qpcDelta);
-uint64_t SecondsDeltaToQpc(double secondsDelta);
-double QpcToSeconds(uint64_t qpc);
+// publish a gauge over statsd
+void UpdateStatsdGauge(const char* gauge, const char* app, float value);
+void FinalizeStatsd();
 
 // LogFile.cpp:
 void log(int level, const char* filename, const char* func, int line, const char* format, ...);

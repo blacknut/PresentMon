@@ -1,122 +1,252 @@
-// Copyright (C) 2019-2021 Intel Corporation
+// Copyright (C) 2019-2021,2023 Intel Corporation
 // SPDX-License-Identifier: MIT
 
 #include "PresentMon.hpp"
 
-static HANDLE gConsoleHandle;
-static char gConsoleWriteBuffer[8 * 1024];
-static uint32_t gConsoleWriteBufferIndex;
-static uint32_t gConsolePrevWriteBufferSize;
-static SHORT gConsoleTop;
-static SHORT gConsoleWidth;
-static SHORT gConsoleBufferHeight;
-static bool gConsoleFirstCommit;
+#include <fcntl.h>
+#include <io.h>
 
-bool InitializeConsole()
+static COORD gWritePosition{};
+static bool gStderrIsConsole = false;
+static bool gStdoutIsConsole = false;
+
+static bool InitConsole(DWORD stdHandle, FILE* fp)
 {
-    gConsoleHandle = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (gConsoleHandle == INVALID_HANDLE_VALUE) {
+    HANDLE console = GetStdHandle(stdHandle);
+    if (console == INVALID_HANDLE_VALUE) {
         return false;
     }
+    if (console == NULL) {
+        return false;
+    }
+
+    DWORD mode;
+    if (GetConsoleMode(console, &mode)) {
+        _setmode(_fileno(fp), _O_U16TEXT);
+        return true;
+    }
+
+    DWORD type = GetFileType(console);
+    if ((type & 0x3) == FILE_TYPE_DISK) {
+        LARGE_INTEGER size{};
+        GetFileSizeEx(console, &size);
+
+        if (size.QuadPart == 0) {
+            uint16_t bom = 0xfeff;
+            DWORD w;
+            WriteFile(console, &bom, 2, &w, nullptr);
+        }
+
+        _setmode(_fileno(fp), _O_U16TEXT);
+    }
+
+    return false;
+}
+
+bool StdOutIsConsole()
+{
+    return gStdoutIsConsole;
+}
+
+void InitializeConsole()
+{
+    gStderrIsConsole = InitConsole(STD_ERROR_HANDLE, stderr);
+    gStdoutIsConsole = InitConsole(STD_OUTPUT_HANDLE, stdout);
+}
+
+void FinalizeConsole()
+{
+    if (BeginConsoleUpdate()) {
+        EndConsoleUpdate();
+    }
+}
+
+static uint32_t VPrint(wchar_t* buffer, uint32_t bufferCount, wchar_t const* format, va_list val)
+{
+    assert(bufferCount > 0);
+
+    int r = _vsnwprintf_s(buffer, bufferCount, _TRUNCATE, format, val);
+
+    uint32_t numChars;
+    if (r >= 0) {
+        numChars = (uint32_t) r;
+    } else {
+        numChars = bufferCount - 1;
+
+        if (numChars > 0) {
+            uint32_t i = numChars;
+            auto formatLen = wcslen(format);
+            if (formatLen > 0 && format[formatLen - 1] == L'\n') {
+                buffer[--i] = L'\n';
+            }
+
+            for (uint32_t j = 0; j < std::min(i, 3u); ++j) {
+                buffer[--i] = L'.';
+            }
+        }
+    }
+
+    return numChars;
+}
+
+static void VConsolePrint(wchar_t const* format, va_list val, bool newLine)
+{
+    wchar_t buffer[256];
+    uint32_t numChars = VPrint(buffer, _countof(buffer), format, val);
+
+    HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
 
     CONSOLE_SCREEN_BUFFER_INFO info = {};
-    if (GetConsoleScreenBufferInfo(gConsoleHandle, &info) == 0) {
+    GetConsoleScreenBufferInfo(console, &info);
+    if (info.dwSize.X == 0) {
+        return;
+    }
+
+    COORD endPosition;
+    endPosition.Y = gWritePosition.Y + (SHORT) ((numChars + gWritePosition.X) / info.dwSize.X);
+    endPosition.X = (numChars + gWritePosition.X) % info.dwSize.X;
+
+    SHORT finalY = endPosition.Y + (newLine ? 1 : 0);
+    if (finalY >= info.dwSize.Y) {
+        SHORT deltaY = finalY - info.dwSize.Y + 1;
+
+        SMALL_RECT rect;
+        rect.Left   = 0;
+        rect.Top    = deltaY;
+        rect.Right  = info.dwSize.X - 1;
+        rect.Bottom = info.dwSize.Y - deltaY - 1;
+
+        COORD dstPos;
+        dstPos.X = 0;
+        dstPos.Y = 0;
+
+        CHAR_INFO fill;
+        fill.Char.UnicodeChar = L' ';
+        fill.Attributes = info.wAttributes;
+
+        ScrollConsoleScreenBufferW(console, &rect, nullptr, dstPos, &fill);
+
+        info.dwCursorPosition.Y -= deltaY;
+        gWritePosition.Y        -= deltaY;
+        endPosition.Y           -= deltaY;
+
+        SetConsoleCursorPosition(console, info.dwCursorPosition);
+    }
+
+    if (info.dwCursorPosition.Y >= info.srWindow.Top &&
+        info.dwCursorPosition.Y <= info.srWindow.Bottom &&
+        finalY > info.srWindow.Bottom) {
+        SHORT deltaY = finalY - info.srWindow.Bottom;
+
+        SMALL_RECT rect;
+        rect.Left   = 0;
+        rect.Top    = deltaY;
+        rect.Right  = 0;
+        rect.Bottom = deltaY;
+
+        SetConsoleWindowInfo(console, FALSE, &rect);
+    }
+
+    DWORD numCharsWritten = 0;
+    WriteConsoleOutputCharacterW(console, buffer, numChars, gWritePosition, &numCharsWritten);
+
+    if (newLine) {
+        numChars = info.dwSize.X - endPosition.X;
+        FillConsoleOutputCharacterW(console, L' ', numChars, endPosition, &numCharsWritten);
+
+        gWritePosition.X = 0;
+        gWritePosition.Y = endPosition.Y + 1;
+    } else {
+        gWritePosition = endPosition;
+    }
+}
+
+void ConsolePrint(wchar_t const* format, ...)
+{
+    va_list val;
+    va_start(val, format);
+    VConsolePrint(format, val, false);
+    va_end(val);
+}
+
+void ConsolePrintLn(wchar_t const* format, ...)
+{
+    va_list val;
+    va_start(val, format);
+    VConsolePrint(format, val, true);
+}
+
+bool BeginConsoleUpdate()
+{
+    if (!gStdoutIsConsole) {
         return false;
     }
 
-    gConsoleTop = info.dwCursorPosition.Y;
-    gConsoleWidth = info.srWindow.Right - info.srWindow.Left + 1;
-    gConsoleBufferHeight = info.dwSize.Y;
-    gConsoleWriteBufferIndex = 0;
-    gConsolePrevWriteBufferSize = 0;
-    gConsoleFirstCommit = true;
+    HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
+
+    CONSOLE_SCREEN_BUFFER_INFO info = {};
+    GetConsoleScreenBufferInfo(console, &info);
+
+    gWritePosition = info.dwCursorPosition;
 
     return true;
 }
 
-static void vConsolePrint(char const* format, va_list args)
+void EndConsoleUpdate()
 {
-    auto s = gConsoleWriteBuffer + gConsoleWriteBufferIndex;
-    auto n = sizeof(gConsoleWriteBuffer) - gConsoleWriteBufferIndex;
+    HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
 
-    int r = vsnprintf(s, n, format, args);
-    if (r > 0) {
-        gConsoleWriteBufferIndex = min((uint32_t) (n - 1), gConsoleWriteBufferIndex + r);
-    }
-}
-
-void ConsolePrint(char const* format, ...)
-{
-    va_list args;
-    va_start(args, format);
-    vConsolePrint(format, args);
-    va_end(args);
-}
-
-void ConsolePrintLn(char const* format, ...)
-{
-    va_list args;
-    va_start(args, format);
-    vConsolePrint(format, args);
-    va_end(args);
-
-    auto x = gConsoleWriteBufferIndex % gConsoleWidth;
-    auto s = gConsoleWidth - x;
-    memset(gConsoleWriteBuffer + gConsoleWriteBufferIndex, ' ', s);
-    gConsoleWriteBufferIndex += s;
-}
-
-void CommitConsole()
-{
-    auto sizeWritten = gConsoleWriteBufferIndex;
-    auto linesWritten = (SHORT) (sizeWritten / gConsoleWidth);
-
-    // Reset gConsoleTop on the first commit so we don't overwrite any warning
-    // messages.
-    auto size = sizeWritten;
-    if (gConsoleFirstCommit) {
-        gConsoleFirstCommit = false;
-
-        CONSOLE_SCREEN_BUFFER_INFO info = {};
-        GetConsoleScreenBufferInfo(gConsoleHandle, &info);
-        gConsoleTop = info.dwCursorPosition.Y;
-    } else {
-        // Write some extra empty lines to make sure we clear anything from
-        // last time.
-        if (size < gConsolePrevWriteBufferSize) {
-            memset(gConsoleWriteBuffer + size, ' ', gConsolePrevWriteBufferSize - size);
-            size = gConsolePrevWriteBufferSize;
-        }
-    }
-
-    // If we're at the end of the console buffer, issue some new lines to make
-    // some space.
-    auto maxCursorY = gConsoleBufferHeight - linesWritten;
-    if (gConsoleTop > maxCursorY) {
-        COORD bottom = { 0, gConsoleBufferHeight - 1 };
-        SetConsoleCursorPosition(gConsoleHandle, bottom);
-        printf("\n");
-        for (--gConsoleTop; gConsoleTop > maxCursorY; --gConsoleTop) {
-            printf("\n");
-        }
-    }
-
-    // Write to the console.
-    DWORD dwCharsWritten = 0;
-    COORD cursor = { 0, gConsoleTop };
-    WriteConsoleOutputCharacterA(gConsoleHandle, gConsoleWriteBuffer, (DWORD) size, cursor, &dwCharsWritten);
-
-    // Put the cursor at the end of the written text.
-    cursor.Y += linesWritten;
-    SetConsoleCursorPosition(gConsoleHandle, cursor);
-
-    // Update console info in case it was resized.
     CONSOLE_SCREEN_BUFFER_INFO info = {};
-    GetConsoleScreenBufferInfo(gConsoleHandle, &info);
-    gConsoleWidth = info.srWindow.Right - info.srWindow.Left + 1;
-    gConsoleBufferHeight = info.dwSize.Y;
-    gConsoleWriteBufferIndex = 0;
-    gConsolePrevWriteBufferSize = sizeWritten;
+    GetConsoleScreenBufferInfo(console, &info);
+
+    COORD dstPos;
+    dstPos.X = 0;
+    dstPos.Y = 0;
+
+    COORD dstSize;
+    dstSize.X = info.dwSize.X;
+    dstSize.Y = 4;  // 2 should be enough to catch any presentmon stats line, but 4 is more robust
+                    // to printing with concurrent resizing of the console.
+
+    CHAR_INFO* buffer = new CHAR_INFO [dstSize.X * dstSize.Y];
+
+    COORD srcPos;
+    srcPos.X = 0;
+    srcPos.Y = gWritePosition.Y;
+
+    SMALL_RECT rect;
+    for ( ; srcPos.Y < info.dwSize.Y; srcPos.Y += dstSize.Y) {
+        rect.Left   = 0;
+        rect.Top    = srcPos.Y;
+        rect.Right  = dstSize.X - 1;
+        rect.Bottom = srcPos.Y + dstSize.Y - 1;
+        ReadConsoleOutputW(console, buffer, dstSize, dstPos, &rect);
+
+        uint32_t numChars = (uint32_t) (rect.Bottom - rect.Top + 1) * (rect.Right - rect.Left + 1);
+
+        bool clear = false;
+        for (uint32_t i = 0; i < numChars; ++i) {
+            if (buffer[i].Char.UnicodeChar != L' ') {
+                clear = true;
+                break;
+            }
+        }
+
+        if (clear) {
+            DWORD numCharsWritten;
+            FillConsoleOutputCharacterW(console, L' ', numChars, srcPos, &numCharsWritten);
+            assert(numChars == numCharsWritten);
+        } else {
+            break;
+        }
+    }
+
+    delete[] buffer;
+}
+
+static float CalculateFPSForPrintf(float duration)
+{
+    return duration == 0.f ? 0.f : ((1000.f / duration) + 0.05f);
 }
 
 void UpdateConsole(uint32_t processId, ProcessInfo const& processInfo)
@@ -124,7 +254,7 @@ void UpdateConsole(uint32_t processId, ProcessInfo const& processInfo)
     auto const& args = GetCommandLineArgs();
 
     // Don't display non-target or empty processes
-    if (!processInfo.mTargetProcess ||
+    if (!processInfo.mIsTargetProcess ||
         processInfo.mModuleName.empty() ||
         processInfo.mSwapChain.empty()) {
         return;
@@ -136,76 +266,129 @@ void UpdateConsole(uint32_t processId, ProcessInfo const& processInfo)
         auto address = pair.first;
         auto const& chain = pair.second;
 
-        // Only show swapchain data if there at least two presents in the
-        // history.
-        if (chain.mPresentHistoryCount < 2) {
-            continue;
-        }
-
-        auto const& present0 = *chain.mPresentHistory[(chain.mNextPresentIndex - chain.mPresentHistoryCount) % SwapChainData::PRESENT_HISTORY_MAX_COUNT];
-        auto const& presentN = *chain.mPresentHistory[(chain.mNextPresentIndex - 1) % SwapChainData::PRESENT_HISTORY_MAX_COUNT];
-        auto cpuAvg = QpcDeltaToSeconds(presentN.QpcTime - present0.QpcTime) / (chain.mPresentHistoryCount - 1);
-        auto dspAvg = 0.0;
-        auto latAvg = 0.0;
-
-        PresentEvent* displayN = nullptr;
-        if (args.mTrackDisplay) {
-            uint64_t display0ScreenTime = 0;
-            uint64_t latSum = 0;
-            uint32_t displayCount = 0;
-            for (uint32_t i = 0; i < chain.mPresentHistoryCount; ++i) {
-                auto const& p = chain.mPresentHistory[(chain.mNextPresentIndex - chain.mPresentHistoryCount + i) % SwapChainData::PRESENT_HISTORY_MAX_COUNT];
-                if (p->FinalState == PresentResult::Presented) {
-                    if (displayCount == 0) {
-                        display0ScreenTime = p->ScreenTime;
-                    }
-                    displayN = p.get();
-                    latSum += p->ScreenTime - p->QpcTime;
-                    displayCount += 1;
-                }
-            }
-
-            if (displayCount >= 2) {
-                dspAvg = QpcDeltaToSeconds(displayN->ScreenTime - display0ScreenTime) / (displayCount - 1);
-            }
-
-            if (displayCount >= 1) {
-                latAvg = QpcDeltaToSeconds(latSum) / displayCount;
-            }
-        }
-
         if (empty) {
             empty = false;
-            ConsolePrintLn("%s[%d]:", processInfo.mModuleName.c_str(), processId);
+            ConsolePrintLn(L"%s[%d]:", processInfo.mModuleName.c_str(), processId);
         }
 
-        ConsolePrint("    %016llX (%s): SyncInterval=%d Flags=%d %.2lf ms/frame (%.1lf fps",
-            address,
-            RuntimeToString(presentN.Runtime),
-            presentN.SyncInterval,
-            presentN.PresentFlags,
-            1000.0 * cpuAvg,
-            1.0 / cpuAvg);
+        ConsolePrint(L"    %016llX", address);
 
-        if (dspAvg > 0.0) {
-            ConsolePrint(", %.1lf fps displayed", 1.0 / dspAvg);
+        if (chain.mPresentInfoValid) {
+            ConsolePrint(L" (%hs): SyncInterval=%d Flags=%d CPU=%.3fms (%.1f fps)",
+                RuntimeToString(chain.mPresentRuntime),
+                chain.mPresentSyncInterval,
+                chain.mPresentFlags,
+                chain.mAvgCPUDuration,
+                CalculateFPSForPrintf(chain.mAvgCPUDuration));
+
+            // compute affordable name, max 12 alphanum, stop at first .
+            #define MAX_SANITIZED_NAME 12
+            const wchar_t* originalName = processInfo.mModuleName.c_str();
+            size_t originalNameLen = wcslen(originalName);
+            if (originalNameLen > MAX_SANITIZED_NAME) {
+                originalNameLen = MAX_SANITIZED_NAME;
+            }
+            char* sanitizedName = new char[originalNameLen + 1];
+            int sanitizedNameLen = 0;
+            for (int index = 0; index < originalNameLen; index++) {
+                wchar_t c = originalName[index];
+                if (0 != iswalnum(c)) {
+                    sanitizedName[sanitizedNameLen++] = (char)c;
+                } else if ('.' == c) {
+                    break;
+                }
+            }
+            sanitizedName[sanitizedNameLen] = 0;
+
+            // push gauges to statsd
+            UpdateStatsdGauge("app_present_ps", sanitizedName, CalculateFPSForPrintf(chain.mAvgCPUDuration));
+            UpdateStatsdGauge("app_display_ps", sanitizedName, CalculateFPSForPrintf(chain.mAvgDisplayedTime));
+            delete [] sanitizedName;
+
+            if (args.mTrackDisplay) {
+                ConsolePrint(L" Display=%.3fms (%.1f fps)",
+                    chain.mAvgDisplayedTime,
+                    CalculateFPSForPrintf(chain.mAvgDisplayedTime));
+            }
+
+            if (args.mTrackGPU) {
+                ConsolePrint(L" GPU=%.3fms", chain.mAvgGPUDuration);
+            }
+
+            if (args.mTrackDisplay) {
+                ConsolePrint(L" Latency=%.3fms %hs",
+                    chain.mAvgDisplayLatency,
+                    PresentModeToString(chain.mPresentMode));
+            }
         }
 
-        if (latAvg > 0.0) {
-            ConsolePrint(", %.2lf ms latency", 1000.0 * latAvg);
-        }
-
-        ConsolePrint(")");
-
-        if (displayN != nullptr) {
-            ConsolePrint(" %s", PresentModeToString(displayN->PresentMode));
-        }
-
-        ConsolePrintLn("");
+        ConsolePrintLn(L"");
     }
 
     if (!empty) {
-        ConsolePrintLn("");
+        ConsolePrintLn(L"");
     }
 }
 
+static int PrintColor(WORD color, wchar_t const* format, va_list val)
+{
+    #ifndef NDEBUG
+    {
+        wchar_t buffer[64];
+        VPrint(buffer, _countof(buffer), format, val);
+        OutputDebugStringW(buffer);
+    }
+    #endif
+
+    wchar_t* pformat = (wchar_t*) format;
+
+    HANDLE console = GetStdHandle(STD_ERROR_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO info = {};
+    auto setColor = console != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(console, &info) != 0;
+    if (setColor) {
+        auto bg = info.wAttributes & (BACKGROUND_BLUE | BACKGROUND_GREEN | BACKGROUND_RED | BACKGROUND_INTENSITY);
+        if (bg == 0) {
+            color |= FOREGROUND_INTENSITY;
+        }
+        SetConsoleTextAttribute(console, WORD(bg | color));
+
+        auto formatLen = wcslen(format);
+        if (formatLen > 0 && format[formatLen - 1] == L'\n') {
+            auto size = sizeof(wchar_t) * formatLen;
+            pformat = (wchar_t*) malloc(size);
+            memcpy(pformat, format, size);
+            pformat[formatLen - 1] = '\0';
+        }
+    }
+
+    int c = vfwprintf(stderr, pformat, val);
+
+    if (setColor) {
+        SetConsoleTextAttribute(console, info.wAttributes);
+
+        if (pformat != format) {
+            c += fwprintf(stderr, L"\n");
+            free(pformat);
+        }
+    }
+
+    return c;
+}
+
+int PrintWarning(wchar_t const* format, ...)
+{
+    va_list val;
+    va_start(val, format);
+    int c = PrintColor(FOREGROUND_RED | FOREGROUND_GREEN, format, val);
+    va_end(val);
+    return c;
+}
+
+int PrintError(wchar_t const* format, ...)
+{
+    va_list val;
+    va_start(val, format);
+    int c = PrintColor(FOREGROUND_RED, format, val);
+    va_end(val);
+    return c;
+}

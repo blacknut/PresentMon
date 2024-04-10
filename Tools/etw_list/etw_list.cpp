@@ -1,20 +1,25 @@
-// Copyright (C) 2020-2021 Intel Corporation
+// Copyright (C) 2020-2022 Intel Corporation
 // SPDX-License-Identifier: MIT
 
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+
 #include <algorithm>
 #include <assert.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string>
 #include <map>
+#include <unordered_map>
 #include <vector>
 #include <windows.h>
 #include <tdh.h> // Must include after windows.h
 
 #include <generated/version.h>
 
-namespace {
+#include "../../presentdata/etw/microsoft_windows_eventmetadata.h"
+
 
 // ----------------------------------------------------------------------------
 // Helper functions
@@ -24,15 +29,18 @@ void usage()
     fprintf(stderr,
         "usage: etw_list.exe [options]\n"
         "options:\n"
-        "    --provider=filter  List providers that match the filter, argument can be used more than once.\n"
-        "                       filter can be a provider name or guid, and can include up to one '*'.\n"
-        "    --sort=guid|name   Sort providers by specified element.\n"
-        "    --show=property    Show specified property, argument can be used more than once.\n"
-        "                       property can be 'events', 'params', 'keywords', 'levels', 'channels',\n"
-        "                       or 'all'.\n"
-        "    --event=filter     List events that match the filter, argument can be used more than once.\n"
-        "                       filter is of the form Task::opcode, and can include up to one '*'.\n"
-        "    --output=c++       Output in C++ format.\n"
+        "    --etl=path           List information from an ETL file instead of the local system.\n"
+        "    --provider=filter    List providers that match the filter, argument can be used more than once.\n"
+        "                         filter can be a provider name or guid, and can include up to one '*'.\n"
+        "    --sort=guid|name     Sort providers by specified element.\n"
+        "    --event=filter       List events that match the filter, argument can be used more than once.\n"
+        "                         filter is of the form Task::opcode, and can include up to one '*'.\n"
+        "    --no_events          Don't print event information.\n"
+        "    --no_event_structs   Don't print event structures.\n"
+        "    --no_prop_enums      Don't print event property enums.\n"
+        "    --no_keywords        Don't print keywords.\n"
+        "    --no_levels          Don't print levels.\n"
+        "    --no_channels        Don't print channels.\n"
         "build: %s\n", PRESENT_MON_VERSION);
 }
 
@@ -71,9 +79,12 @@ struct Filter
 // too.
 wchar_t const* GetStringPtr(void* base, ULONG offset)
 {
-    auto s = (wchar_t*) ((uintptr_t) base + offset);
-    for (auto n = wcslen(s); n-- && s[n] == L' '; ) {
-        s[n] = '\0';
+    wchar_t* s = nullptr;
+    if (offset > 0) {
+        s = (wchar_t*) ((uintptr_t) base + offset);
+        for (auto n = wcslen(s); n-- && s[n] == L' '; ) {
+            s[n] = '\0';
+        }
     }
     return s;
 }
@@ -90,19 +101,41 @@ struct Provider {
 
     Provider() {}
     Provider(PROVIDER_ENUMERATION_INFO* enumInfo, TRACE_PROVIDER_INFO const& info)
-        : guid_(info.ProviderGuid)
-        , name_(GetStringPtr(enumInfo, info.ProviderNameOffset))
+        : name_(GetStringPtr(enumInfo, info.ProviderNameOffset))
         , manifest_(info.SchemaSource == 0)
     {
+        SetGUID(info.ProviderGuid);
+    }
+
+    void SetGUID(GUID const& guid)
+    {
+        guid_ = guid;
+        guidStr_.clear();
+
         wchar_t* guidStr = nullptr;
-        if (StringFromIID(info.ProviderGuid, &guidStr) == S_OK) {
+        if (StringFromIID(guid, &guidStr) == S_OK) {
             guidStr_ = guidStr;
             CoTaskMemFree(guidStr);
         }
     }
+
+    bool Matches(std::vector<Filter>* filters) const
+    {
+        for (auto ii = filters->begin(), ie = filters->end(); ii != ie; ++ii) {
+            auto const& filter = *ii;
+            if (filter.Matches(name_.c_str()) || filter.Matches(guidStr_.c_str())) {
+                // Remove filter if we found an exact match
+                if (!filter.wildcard_) {
+                    filters->erase(ii);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
-int EnumerateProviders(
+void EnumerateSystemProviders(
     std::vector<Filter>* providerIds,
     std::vector<Provider>* providers)
 {
@@ -111,62 +144,32 @@ int EnumerateProviders(
     auto status = TdhEnumerateProviders(nullptr, &bufferSize);
     if (status != ERROR_INSUFFICIENT_BUFFER) {
         fprintf(stderr, "error: could not enumerate providers (error=%u).\n", status);
-        return 1;
+        exit(1);
     }
 
     auto enumInfo = (PROVIDER_ENUMERATION_INFO*) malloc(bufferSize);
     if (enumInfo == nullptr) {
         fprintf(stderr, "error: could not allocate memory for providers (%u bytes).\n", bufferSize);
-        return 1;
+        exit(1);
     }
 
     status = TdhEnumerateProviders(enumInfo, &bufferSize);
     if (status != ERROR_SUCCESS) {
         fprintf(stderr, "error: could not enumerate providers (error=%u).\n", status);
         free(enumInfo);
-        return 1;
+        exit(1);
     }
 
     auto providerCount = enumInfo->NumberOfProviders;
     providers->reserve(providerCount);
     for (ULONG i = 0; i < providerCount; ++i) {
         Provider provider(enumInfo, enumInfo->TraceProviderInfoArray[i]);
-
-        for (size_t j = 0, n = providerIds->size(); j < n; ++j) {
-            auto providerId = (*providerIds)[j];
-
-            if (providerId.Matches(provider.name_.c_str()) ||
-                providerId.Matches(provider.guidStr_.c_str())) {
-                providers->emplace_back(provider);
-
-                // Remove filter if we found an exact match
-                if (!providerId.wildcard_) {
-                    providerIds->erase(providerIds->begin() + j);
-                }
-                break;
-            }
+        if (provider.Matches(providerIds)) {
+            providers->emplace_back(provider);
         }
     }
 
     free(enumInfo);
-
-    // Add any full GUIDs provided by user, even if not enumerated by
-    // TdhEnumerateProviders().  If we see events from this provider we'll try
-    // to patch the name from the EVENT_INFO.
-    for (auto providerId : *providerIds) {
-        if (providerId.wildcard_) continue;
-
-        GUID guid = {};
-        if (IIDFromString(providerId.part1_.c_str(), &guid) == S_OK) {
-            providers->emplace_back();
-            providers->back().guid_ = guid;
-            providers->back().guidStr_ = providerId.part1_;
-            providers->back().name_ = L"Unknown";
-            providers->back().manifest_ = true;
-        }
-    }
-
-    return 0;
 }
 
 
@@ -177,6 +180,7 @@ struct EventProperty : public EVENT_PROPERTY_INFO {
     std::wstring name_;
     std::wstring lengthName_;
     std::wstring countName_;
+    std::wstring mapName_;
     std::vector<EventProperty> members_;
 
     EventProperty(TRACE_EVENT_INFO* eventInfo, EVENT_PROPERTY_INFO const& propInfo)
@@ -188,6 +192,10 @@ struct EventProperty : public EVENT_PROPERTY_INFO {
             members_.reserve(propCount);
             for (ULONG i = 0; i < propCount; ++i) {
                 members_.emplace_back(eventInfo, eventInfo->EventPropertyInfoArray[propInfo.structType.StructStartIndex + i]);
+            }
+        } else {
+            if (propInfo.nonStructType.MapNameOffset != 0) {
+                mapName_ = GetStringPtr(eventInfo, propInfo.nonStructType.MapNameOffset);
             }
         }
         if (propInfo.Flags & PropertyParamLength) {
@@ -221,6 +229,7 @@ bool HasPointer(EventProperty const& prop)
 }
 
 struct Event : public EVENT_DESCRIPTOR {
+    std::wstring name_;
     std::wstring taskName_;
     std::wstring levelName_;
     std::wstring opcodeName_;
@@ -245,6 +254,11 @@ struct Event : public EVENT_DESCRIPTOR {
             opcodeName_ = b;
         } else {
             opcodeName_ = GetStringPtr(eventInfo, eventInfo->OpcodeNameOffset);
+
+            // ETL-loaded opcode names can have "win:" prepended.
+            if (opcodeName_.rfind(L"win:", 0) == 0) {
+                opcodeName_.erase(0, 4);
+            }
         }
         if (eventInfo->LevelNameOffset == 0) {
             wchar_t b[126];
@@ -263,78 +277,70 @@ struct Event : public EVENT_DESCRIPTOR {
         for (ULONG i = 0; i < propCount; ++i) {
             properties_.emplace_back(eventInfo, eventInfo->EventPropertyInfoArray[i]);
         }
+
+        name_ = taskName_ + L'_' + opcodeName_;
     }
 };
 
-int EnumerateEvents(GUID const& providerGuid, std::vector<Event>* events, std::wstring* outProviderName)
+void EnumerateSystemEvents(GUID const& providerGuid, std::vector<Event>* events, std::wstring* outProviderName)
 {
     ULONG bufferSize = 0;
     auto status = TdhEnumerateManifestProviderEvents((LPGUID) &providerGuid, nullptr, &bufferSize);
     switch (status) {
-    case ERROR_EMPTY:
-        return 0;
-    case ERROR_INSUFFICIENT_BUFFER:
-        break;
-    case ERROR_INVALID_DATA:
-        fprintf(stderr, "error: could not enumerate events (ERROR_INVALID_DATA).\n");
-        return 1;
-    case ERROR_FILE_NOT_FOUND:
-        fprintf(stderr, "error: could not enumerate events (provider meta data not found).\n");
-        return 1;
-    case ERROR_RESOURCE_TYPE_NOT_FOUND:
-        fprintf(stderr, "error: could not enumerate events (ERROR_RESOURCE_TYPE_NOT_FOUND).\n");
-        return 1;
-    case ERROR_NOT_FOUND:
-        fprintf(stderr, "error: could not enumerate events (provider schema information not found).\n");
-        return 1;
+    case ERROR_EMPTY:                   return;
+    case ERROR_INSUFFICIENT_BUFFER:     break;
     default:
-        fprintf(stderr, "error: could not enumerate events (error=%u).\n", status);
-        return 1;
+        fprintf(stderr, "error: could not enumerate events (");
+        switch (status) {
+        case ERROR_INVALID_DATA:            fprintf(stderr, "ERROR_INVALID_DATA"); break;
+        case ERROR_FILE_NOT_FOUND:          fprintf(stderr, "provider meta data not found"); break;
+        case ERROR_RESOURCE_TYPE_NOT_FOUND: fprintf(stderr, "ERROR_RESOURCE_TYPE_NOT_FOUND"); break;
+        case ERROR_NOT_FOUND:               fprintf(stderr, "provider schema information not found"); break;
+        default:                            fprintf(stderr, "error=%u", status);
+        }
+        fprintf(stderr, ").\n");
+        exit(1);
     }
 
     auto enumInfo = (PROVIDER_EVENT_INFO*) malloc(bufferSize);
     if (enumInfo == nullptr) {
         fprintf(stderr, "error: could not allocate memory for events (%u bytes).\n", bufferSize);
-        return 1;
+        exit(1);
     }
 
     status = TdhEnumerateManifestProviderEvents((LPGUID) &providerGuid, enumInfo, &bufferSize);
     if (status != ERROR_SUCCESS) {
         fprintf(stderr, "error: could not enumerate events (error=%u).\n", status);
         free(enumInfo);
-        return 1;
+        exit(1);
     }
 
-    int ret = 0;
     auto eventCount = enumInfo->NumberOfEvents;
     events->reserve(events->size() + eventCount);
     for (ULONG eventIndex = 0; eventIndex < eventCount; ++eventIndex) {
-        auto const& desc = enumInfo->EventDescriptorsArray[eventIndex];
+        auto desc = &enumInfo->EventDescriptorsArray[eventIndex];
 
         bufferSize = 0;
-        status = TdhGetManifestEventInformation((LPGUID) &providerGuid, (PEVENT_DESCRIPTOR) &desc, nullptr, &bufferSize);
+        status = TdhGetManifestEventInformation((LPGUID) &providerGuid, desc, nullptr, &bufferSize);
         if (status != ERROR_INSUFFICIENT_BUFFER) {
             fprintf(stderr, "error: could not get manifest event information (error=%u).\n", status);
-            ret += 1;
-            continue;
+            exit(1);
         }
 
         auto eventInfo = (TRACE_EVENT_INFO*) malloc(bufferSize);
         if (eventInfo == nullptr) {
             fprintf(stderr, "error: could not allocate memory for event information (%u bytes).\n", bufferSize);
-            ret += 1;
-            continue;
+            exit(1);
         }
 
-        status = TdhGetManifestEventInformation((LPGUID) &providerGuid, (PEVENT_DESCRIPTOR) &desc, eventInfo, &bufferSize);
+        status = TdhGetManifestEventInformation((LPGUID) &providerGuid, desc, eventInfo, &bufferSize);
         if (status != ERROR_SUCCESS) {
             fprintf(stderr, "error: could not get manifest event information (error=%u).\n", status);
             free(eventInfo);
-            ret += 1;
-            continue;
+            exit(1);
         }
 
-        events->emplace_back(desc, eventInfo);
+        events->emplace_back(*desc, eventInfo);
 
         // Patch provider name if we didn't find a name during provider
         // enumeration.
@@ -350,8 +356,124 @@ int EnumerateEvents(GUID const& providerGuid, std::vector<Event>* events, std::w
     }
 
     free(enumInfo);
-    return ret;
 }
+
+void FilterEvents(
+    std::vector<Filter> const& eventIds,
+    std::vector<Event>* events)
+{
+    for (auto ii = events->begin(), ie = events->end(); ii != ie; ) {
+        auto id = ii->taskName_ + L"::" + ii->opcodeName_;
+        auto keep = false;
+        for (auto const& eventId : eventIds) {
+            if (eventId.Matches(id.c_str())) {
+                keep = true;
+                break;
+            }
+        }
+        if (keep) {
+            ++ii;
+        } else {
+            ii = events->erase(ii);
+            ie = events->end();
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// ETL
+
+struct EtlProvider {
+    Provider provider_;
+    std::vector<Event> events_;
+};
+
+struct GUIDHash {
+    size_t operator()(GUID const& key) const
+    {
+        static_assert((sizeof(key) % sizeof(size_t)) == 0, "sizeof(GUID) must be multiple of sizeof(size_t)");
+        auto p = (size_t const*)&key;
+        auto h = (size_t)0;
+        for (size_t i = 0; i < sizeof(key) / sizeof(size_t); ++i) {
+            h ^= p[i];
+        }
+        return h;
+    }
+};
+
+struct GUIDEqual {
+    bool operator()(GUID const& lhs, GUID const& rhs) const
+    {
+        return memcmp(&lhs, &rhs, sizeof(GUID)) == 0;
+    }
+};
+
+std::unordered_map<GUID, EtlProvider, GUIDHash, GUIDEqual> etlProviders_;
+
+void CALLBACK EventRecordCallback(EVENT_RECORD* eventRecord)
+{
+    auto const& hdr = eventRecord->EventHeader;
+
+    if (hdr.ProviderId == Microsoft_Windows_EventMetadata::GUID &&
+        hdr.EventDescriptor.Opcode == Microsoft_Windows_EventMetadata::EventInfo::Opcode) {
+        auto tei = (TRACE_EVENT_INFO*) eventRecord->UserData;
+
+        auto pr = etlProviders_.emplace(tei->ProviderGuid, EtlProvider());
+        auto p = &pr.first->second;
+        if (pr.second) {
+            p->provider_.SetGUID(tei->ProviderGuid);
+        }
+
+        if (p->provider_.name_.empty() && tei->ProviderNameOffset != 0) {
+            p->provider_.name_ = GetStringPtr((void*) tei, tei->ProviderNameOffset);
+        }
+
+        p->events_.emplace_back(tei->EventDescriptor, tei);
+    }
+}
+
+void EnumerateEtlProviders(
+    wchar_t* etlFile,
+    std::vector<Filter>* providerIds,
+    std::vector<Provider>* providers)
+{
+    EVENT_TRACE_LOGFILEW traceProps = {};
+    traceProps.LogFileName = etlFile;
+    traceProps.ProcessTraceMode = PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
+    traceProps.EventRecordCallback = &EventRecordCallback;
+
+    auto traceHandle = OpenTraceW(&traceProps);
+    if (traceHandle == INVALID_PROCESSTRACE_HANDLE) {
+        fprintf(stderr, "error: failed to open ETL file: %ls\n", etlFile);
+        exit(1);
+    }
+
+    auto status = ProcessTrace(&traceHandle, 1, NULL, NULL);
+    status = CloseTrace(traceHandle);
+
+    for (auto ii = etlProviders_.begin(), ie = etlProviders_.end(); ii != ie; ) {
+        auto const& provider = ii->second.provider_;
+        if (provider.Matches(providerIds)) {
+            providers->emplace_back(provider);
+            ++ii;
+        } else {
+            ii = etlProviders_.erase(ii);
+        }
+    }
+}
+
+void EnumerateEtlEvents(GUID const& providerGuid, std::vector<Event>* events, std::wstring* outProviderName)
+{
+    (void) outProviderName;
+
+    auto ii = etlProviders_.find(providerGuid);
+    if (ii == etlProviders_.end()) {
+        events->clear();
+    } else {
+        *events = ii->second.events_;
+    }
+}
+
 
 
 // ----------------------------------------------------------------------------
@@ -430,13 +552,27 @@ wchar_t const* OutTypeToString(USHORT outtype) {
 
 std::wstring CppCondition(std::wstring s)
 {
-    for (size_t i = 0, n = s.length(); i < n; ++i) {
-        if (s[i] == L' ' ||
-            s[i] == L'-' ||
-            s[i] == L'/' ||
-            s[i] == L':' ||
-            s[i] == L'.') {
-            s[i] = L'_';
+    auto n = s.length();
+    if (n > 0) {
+        // Add _ if first character is a number
+        size_t i = 0;
+        if (isdigit(s[i])) {
+            s.insert(s.begin(), '_');
+            i += 1;
+        }
+
+        // Convert bad characters into _
+        for ( ; i < n; ++i) {
+            if (s[i] == L' ' ||
+                s[i] == L'-' ||
+                s[i] == L'/' ||
+                s[i] == L':' ||
+                s[i] == L'.' ||
+                s[i] == L',' ||
+                s[i] == L'(' ||
+                s[i] == L')') {
+                s[i] = L'_';
+            }
         }
     }
     return s;
@@ -531,6 +667,8 @@ void PrintCppStruct(std::vector<EventProperty> const& members, std::wstring cons
                 }
                 type = stype.c_str();
                 structMemberIndex += 1;
+            } else if (member.nonStructType.MapNameOffset != 0) {
+                type = member.mapName_.c_str();
             } else {
                 switch (member.nonStructType.InType) {
                 case TDH_INTYPE_INT8:     type = L"int8_t"; break;
@@ -609,50 +747,86 @@ void PrintCppStruct(std::vector<EventProperty> const& members, std::wstring cons
     printf("\n");
 }
 
-void PrintEventProperty(EventProperty const& prop, uint32_t indentCount=0, uint32_t indentWidth=4)
+void CollectUsedEnums(
+    Event const& event,
+    std::vector<EventProperty> const& members,
+    std::map<std::wstring, Event const*>* usedEnums)
 {
-    // Name
-    printf("%*s%-30ls", indentCount * indentWidth, "", prop.name_.c_str());
-
-    // Type
-    if (prop.Flags & PropertyStruct) {
-        printf(" {\n");
-        for (auto const& subProp : prop.members_) {
-            PrintEventProperty(subProp, indentCount + 1, indentWidth);
+    for (auto const& member : members) {
+        if (member.Flags & PropertyStruct) {
+            CollectUsedEnums(event, member.members_, usedEnums);
+        } else if (member.nonStructType.MapNameOffset != 0) {
+            usedEnums->emplace(member.mapName_, &event);
         }
-        printf("%*s}", indentCount * indentWidth, "");
-    } else if (prop.Flags & PropertyHasCustomSchema) {
-        // TODO
-        printf(" <custom schema, not implemented>");
-    } else {
-        printf(" %ls -> %ls", InTypeToString(prop.nonStructType.InType), OutTypeToString(prop.nonStructType.OutType));
     }
-
-    // TODO: PropertyWBEMXmlFragment
-
-    // Array count
-    if (prop.Flags & PropertyParamLength) {
-        printf(" (%ls)", prop.lengthName_.c_str());
-    }
-    if (prop.Flags & PropertyParamFixedLength) {
-        printf(" (%u)", prop.length);
-    }
-    if (prop.Flags & PropertyParamCount) {
-        printf(" [%ls]", prop.countName_.c_str());
-    }
-    if (prop.Flags & PropertyParamFixedCount) {
-        printf(" [%u]", prop.count);
-    }
-
-    // Tags
-    if (prop.Flags & PropertyHasTags) {
-        printf(" @0x%07x", prop.Tags);
-    }
-
-    // Done
-    printf("\n");
 }
 
+void PrintEnum(
+    GUID const& providerGuid,
+    Event const& event,
+    std::wstring const& name)
+{
+    EVENT_RECORD eventRecord = {};
+    eventRecord.EventHeader.ProviderId = providerGuid;
+    eventRecord.EventHeader.EventDescriptor = event;
+
+    ULONG bufferSize = 0;
+    TDHSTATUS status = TdhGetEventMapInformation(&eventRecord, (PWSTR) name.c_str(), nullptr, &bufferSize);
+    if (status != ERROR_INSUFFICIENT_BUFFER) {
+        fprintf(stderr, "error: could not get event map information (error=%u).\n", status);
+        exit(1);
+    }
+
+    auto mapInfo = (EVENT_MAP_INFO*) malloc(bufferSize);
+    if (mapInfo == nullptr) {
+        fprintf(stderr, "error: could not allocate memory for event information (%u bytes).\n", bufferSize);
+        exit(1);
+    }
+
+    status = TdhGetEventMapInformation(&eventRecord, (PWSTR) name.c_str(), mapInfo, &bufferSize);
+    if (status != ERROR_SUCCESS) {
+        fprintf(stderr, "error: could not get manifest event information (error=%u).\n", status);
+        free(mapInfo);
+        exit(1);
+    }
+
+    if (!(mapInfo->Flag == EVENTMAP_INFO_FLAG_MANIFEST_BITMAP ||
+          mapInfo->Flag == EVENTMAP_INFO_FLAG_MANIFEST_VALUEMAP) ||
+        mapInfo->MapEntryValueType != EVENTMAP_ENTRY_VALUETYPE_ULONG) {
+        fprintf(stderr, "error: unsupported map type: 0x%x, %u.\n", mapInfo->Flag, mapInfo->MapEntryValueType);
+        free(mapInfo);
+        exit(1);
+    }
+
+    auto nameLength = name.length();
+    auto nameWithoutTYPE = name;
+    if (nameLength > 5 && nameWithoutTYPE.compare(nameLength - 5, 5, L"_TYPE") == 0) {
+        nameWithoutTYPE.resize(nameLength - 5);
+    }
+
+    std::map<std::wstring, uint32_t> entryNameCount;
+
+    printf("\nenum class %ls : uint32_t {\n", nameWithoutTYPE.c_str());
+    for (ULONG i = 0; i < mapInfo->EntryCount; ++i) {
+        auto const& entry = mapInfo->MapEntryArray[i];
+
+        auto str = GetStringPtr(mapInfo, entry.OutputOffset);
+             if (wcsncmp(name.c_str(),            str, nameLength    ) == 0) str += nameLength;
+        else if (wcsncmp(nameWithoutTYPE.c_str(), str, nameLength - 5) == 0) str += nameLength - 5;
+        if (*str == L'_') str += 1;
+
+        auto entryName = CppCondition(str); // str can have spaces, parenthesis, etc..
+        auto count = &entryNameCount.emplace(entryName, 0).first->second;
+        *count += 1;
+        if (*count == 1) {
+            printf("    %ls = %lu,\n", entryName.c_str(), entry.Value);
+        } else {
+            printf("    %ls_%u = %lu,\n", entryName.c_str(), *count, entry.Value);
+        }
+    }
+    printf("};\n");
+
+    free(mapInfo);
 }
 
 int wmain(
@@ -660,19 +834,23 @@ int wmain(
     wchar_t** argv)
 {
     // Parse command line arguments
-    uint32_t errorCount = 0;
     std::vector<Filter> providerIds;
     std::vector<Filter> eventIds;
+    wchar_t* etlFile = nullptr;
     auto sortByName = false;
     auto sortByGuid = false;
-    auto showAll = false;
-    auto showKeywords = false;
-    auto showLevels = false;
-    auto showChannels = false;
-    auto showEvents = false;
-    auto showEventParams = false;
-    auto cppFormat = false;
+    auto showKeywords = true;
+    auto showLevels = true;
+    auto showChannels = true;
+    auto showEvents = true;
+    auto showEventStructs = true;
+    auto showPropertyEnums = true;
     for (int i = 1; i < argc; ++i) {
+        if (wcsncmp(argv[i], L"--etl=", 6) == 0) {
+            etlFile = argv[i] + 6;
+            continue;
+        }
+
         if (wcsncmp(argv[i], L"--provider=", 11) == 0) {
             providerIds.emplace_back(argv[i] + 11);
             continue;
@@ -695,38 +873,33 @@ int wmain(
             continue;
         }
 
-        if (wcscmp(argv[i], L"--show=all") == 0) {
-            showAll = true;
+        if (wcscmp(argv[i], L"--no_keywords") == 0) {
+            showKeywords = false;
             continue;
         }
 
-        if (wcscmp(argv[i], L"--show=keywords") == 0) {
-            showKeywords = true;
+        if (wcscmp(argv[i], L"--no_levels") == 0) {
+            showLevels = false;
             continue;
         }
 
-        if (wcscmp(argv[i], L"--show=levels") == 0) {
-            showLevels = true;
+        if (wcscmp(argv[i], L"--no_channels") == 0) {
+            showChannels = false;
             continue;
         }
 
-        if (wcscmp(argv[i], L"--show=channels") == 0) {
-            showChannels = true;
+        if (wcscmp(argv[i], L"--no_events") == 0) {
+            showEvents = false;
             continue;
         }
 
-        if (wcscmp(argv[i], L"--show=events") == 0) {
-            showEvents = true;
+        if (wcscmp(argv[i], L"--no_event_structs") == 0) {
+            showEventStructs = false;
             continue;
         }
 
-        if (wcscmp(argv[i], L"--show=params") == 0) {
-            showEventParams = true;
-            continue;
-        }
-
-        if (wcscmp(argv[i], L"--output=c++") == 0) {
-            cppFormat = true;
+        if (wcscmp(argv[i], L"--no_prop_enums") == 0) {
+            showPropertyEnums = false;
             continue;
         }
 
@@ -741,29 +914,37 @@ int wmain(
         return 1;
     }
 
-    if (cppFormat && showEventParams) {
-        fprintf(stderr, "warning: cannot show params in C++ format, ignoring --show=params.\n");
-    }
-
-    if (showAll) {
-        showKeywords = true;
-        showLevels = true;
-        showChannels = true;
-        showEvents = true;
-        showEventParams = true;
-    }
-
-    if (cppFormat) {
-        showEventParams = false;
-    }
-
     if (eventIds.empty()) {
         eventIds.emplace_back(L"*");
     }
 
+    if (etlFile) {
+        showPropertyEnums = false;
+    }
+
     // Enumerate all providers that match providerIds
     std::vector<Provider> providers;
-    errorCount += EnumerateProviders(&providerIds, &providers);
+    if (etlFile) {
+        EnumerateEtlProviders(etlFile, &providerIds, &providers);
+    } else {
+        EnumerateSystemProviders(&providerIds, &providers);
+    }
+
+    // Add any full GUIDs provided by user, even if not enumerated by the
+    // system/etl.  If we see events from this provider we'll try to patch the
+    // name from the EVENT_INFO.
+    for (auto providerId : providerIds) {
+        if (!providerId.wildcard_) {
+            GUID guid = {};
+            if (IIDFromString(providerId.part1_.c_str(), &guid) == S_OK) {
+                providers.emplace_back();
+                providers.back().guid_ = guid;
+                providers.back().guidStr_ = providerId.part1_;
+                providers.back().name_ = L"Unknown";
+                providers.back().manifest_ = true;
+            }
+        }
+    }
 
     // Sort providers
     if (sortByName) {
@@ -777,66 +958,44 @@ int wmain(
     }
 
     // List providers
-    if (cppFormat) {
-        SYSTEMTIME t = {};
-        GetSystemTime(&t);
+    SYSTEMTIME t = {};
+    GetSystemTime(&t);
 
-        printf(
-            "// This file originally generated by etw_list\n"
-            "//     version:    %s\n"
-            "//     parameters:",
-            PRESENT_MON_VERSION);
-        for (int i = 1; i < argc; ++i) {
-            printf(" %ls", argv[i]);
-        }
-        printf(
-            "\n"
-            "// Copyright (C) 2020-%s%d Intel Corporation\n"
-            "// SPDX-License-Identifier: MIT\n"
-            "#pragma once\n"
-            "\n",
-            t.wYear == 2021 ? "" : "2021,",
-            t.wYear);
-    } else {
-        printf("Providers (%zu):\n", providers.size());
+    printf(
+        "// Copyright (C) 2020-%d Intel Corporation\n"
+        "// SPDX-License-Identifier: MIT\n"
+        "//\n"
+        "// This file originally generated by etw_list\n"
+        "//     version:    %s\n"
+        "//     parameters:",
+        t.wYear,
+        PRESENT_MON_VERSION);
+    for (int i = 1; i < argc; ++i) {
+        printf(" %ls", argv[i]);
     }
+    printf("\n#pragma once\n");
     for (auto& provider : providers) {
-        // Enumerate provider events first (which may patch provider.name_)
-        std::map<std::wstring, std::vector<Event> > events;
-        if (showEvents) {
-            if (provider.manifest_) {
-                std::vector<Event> allEvents;
-                errorCount += EnumerateEvents(provider.guid_, &allEvents, &provider.name_);
-
-                for (auto const& event : allEvents) {
-                    auto id = event.taskName_ + L"::" + event.opcodeName_;
-                    for (auto const& eventId : eventIds) {
-                        if (eventId.Matches(id.c_str())) {
-                            events.emplace(event.taskName_, std::vector<Event>()).first->second.emplace_back(event);
-                            break;
-                        }
-                    }
-                }
-            } else {
-                // TODO
-            }
+        // Enumerate events first, since that can help resolve the provider
+        // name.
+        std::vector<Event> events;
+        if (etlFile) {
+            EnumerateEtlEvents(provider.guid_, &events, &provider.name_);
+        } else {
+            EnumerateSystemEvents(provider.guid_, &events, &provider.name_);
         }
 
         // Print provider name/guid
-        if (cppFormat) {
-            printf("namespace %ls {\n", CppCondition(provider.name_).c_str());
-            printf("\n");
-            printf("struct __declspec(uuid(\"%ls\")) GUID_STRUCT;\n", provider.guidStr_.c_str());
-            printf("static const auto GUID = __uuidof(GUID_STRUCT);\n");
-            printf("\n");
-        } else {
-            printf("    %ls %ls\n",
-                provider.guidStr_.c_str(),
-                provider.name_.c_str());
-        }
+        printf(
+            "\n"
+            "namespace %ls {\n"
+            "\n"
+            "struct __declspec(uuid(\"%ls\")) GUID_STRUCT;\n"
+            "static const auto GUID = __uuidof(GUID_STRUCT);\n",
+            CppCondition(provider.name_).c_str(),
+            provider.guidStr_.c_str());
 
         // Print field information
-        {
+        if (etlFile == nullptr) {
             std::vector<EVENT_FIELD_TYPE> fieldTypes;
             if (showKeywords) fieldTypes.emplace_back(EventKeywordInformation);
             if (showLevels)   fieldTypes.emplace_back(EventLevelInformation);
@@ -859,76 +1018,69 @@ int wmain(
 
                 if (hr != ERROR_INSUFFICIENT_BUFFER) {
                     fprintf(stderr, "error: failed to enumerate provider %s information (%u)\n", eventFieldTypeStr, hr);
-                    continue;
+                    return 1;
                 }
 
-                if (cppFormat) {
-                    printf("enum class %s : %s {\n", eventFieldTypeStr, eventFieldTypeTypeStr);
-                } else {
-                    printf("        %ss\n", eventFieldTypeStr);
-                }
+                printf("\nenum class %s : %s {\n", eventFieldTypeStr, eventFieldTypeTypeStr);
 
                 auto providerFieldInfo = (PROVIDER_FIELD_INFOARRAY*) malloc(size);
                 hr = TdhEnumerateProviderFieldInformation(&provider.guid_, fieldType, providerFieldInfo, &size);
                 if (hr != ERROR_SUCCESS) {
                     fprintf(stderr, "error: failed to enumerate provider %s information (%u)\n", eventFieldTypeStr, hr);
                     free(providerFieldInfo);
-                    continue;
+                    return 1;
                 }
 
                 std::vector<std::wstring> names;
                 names.reserve(providerFieldInfo->NumberOfElements);
-                int maxWidth = 0;
+                int maxNameWidth = 0;
                 for (ULONG i = 0; i < providerFieldInfo->NumberOfElements; ++i) {
                     auto name = GetStringPtr(providerFieldInfo, providerFieldInfo->FieldInfoArray[i].NameOffset);
-                    if (cppFormat) {
-                        names.emplace_back(CppCondition(name));
-                        maxWidth = std::max(maxWidth, (int) names.back().length());
-                    } else {
-                        names.emplace_back(name);
-                    }
+                    names.emplace_back(CppCondition(name));
+                    maxNameWidth = std::max(maxNameWidth, (int) names.back().length());
                 }
 
                 for (ULONG i = 0; i < providerFieldInfo->NumberOfElements; ++i) {
-                    if (cppFormat) {
-                        printf("    %-*ls = 0x%llx,\n", maxWidth, names[i].c_str(), providerFieldInfo->FieldInfoArray[i].Value);
-                    } else {
-                        printf("            0x%llx: %ls\n", providerFieldInfo->FieldInfoArray[i].Value, names[i].c_str());
-                    }
+                    printf("    %-*ls = 0x%llx,\n", maxNameWidth, names[i].c_str(), providerFieldInfo->FieldInfoArray[i].Value);
                 }
 
                 free(providerFieldInfo);
 
-                if (cppFormat) {
-                    printf("};\n\n");
-                }
+                printf("};\n");
             }
         }
 
-        // Print events ordered by task
-        if (showEvents) {
-            if (!provider.manifest_) {
-                printf("%swarning: etw_list can't enumerate events from WMI MOF class-based providers.\n", cppFormat ? "// " : "        ");
-            }
-            if (cppFormat) {
-                if (!events.empty()) {
-                    std::vector<std::wstring> eventName;
-                    int maxWidth = 0;
-                    for (auto const& pair : events) {
-                        for (auto const& event : pair.second) {
-                            auto baseName = CppCondition(pair.first) + L'_' + event.opcodeName_;
-                            auto name = baseName;
-                            for (int version = 2; std::find(eventName.begin(), eventName.end(), name) != eventName.end(); ++version) {
-                                wchar_t versionStr[128] = {};
-                                _snwprintf_s(versionStr, _TRUNCATE, L"_%d", version);
-                                name = baseName + versionStr;
-                            }
-                            eventName.emplace_back(name);
-                            maxWidth = std::max(maxWidth, (int) name.length());
-                        }
+        // Print events and/or event structs ordered by task
+        if (showEvents || showEventStructs || showPropertyEnums) {
+            FilterEvents(eventIds, &events);
+            auto eventCount = events.size();
+            if (eventCount > 0) {
+                // Sort events based on name, then id.
+                std::sort(events.begin(), events.end(), [](Event const& a, Event const& b) {
+                    auto r = a.name_.compare(b.name_);
+                    return r < 0 || (r == 0 && a.Id < b.Id);
+                });
+
+                // There can be events with the same name but different id, so
+                // change duplicate names by appending _2, _3 etc.
+                auto maxEventNameWidth = events[0].name_.length();
+                for (size_t i = 1, j = 1; i < eventCount; ++i) {
+                    if (events[i - j].name_ == events[i].name_) {
+                        wchar_t num[128];
+                        _snwprintf_s(num, _TRUNCATE, L"_%zu", j + 1);
+                        events[i].name_ = events[i].name_ + num;
+                        j += 1;
+                    } else {
+                        j = 1;
                     }
 
+                    maxEventNameWidth = std::max(maxEventNameWidth, events[i].name_.length());
+                }
+
+                // Print event descriptors
+                if (showEvents) {
                     printf(
+                        "\n"
                         "// Event descriptors:\n"
                         "#define EVENT_DESCRIPTOR_DECL(name_, id_, version_, channel_, level_, opcode_, task_, keyword_) "
                         "struct name_ { \\\n"
@@ -944,90 +1096,58 @@ int wmain(
                         showKeywords ? "Keyword " : "uint64_t",
                         showKeywords ? "(Keyword) " : "");
 
-                    size_t eventIdx = 0;
-                    for (auto const& pair : events) {
-                        for (auto const& event : pair.second) {
-                            printf("EVENT_DESCRIPTOR_DECL(%-*ls, 0x%04x, 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%04x, 0x%016llx)\n",
-                                maxWidth,
-                                eventName[eventIdx].c_str(),
-                                event.Id,
-                                event.Version,
-                                event.Channel,
-                                event.Level,
-                                event.Opcode,
-                                event.Task,
-                                event.Keyword);
-                            eventIdx += 1;
-                        }
+                    for (auto const& event : events) {
+                        printf("EVENT_DESCRIPTOR_DECL(%-*ls, 0x%04x, 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%04x, 0x%016llx)\n",
+                            (int) maxEventNameWidth,
+                            event.name_.c_str(),
+                            event.Id,
+                            event.Version,
+                            event.Channel,
+                            event.Level,
+                            event.Opcode,
+                            event.Task,
+                            event.Keyword);
                     }
 
+                    printf("\n#undef EVENT_DESCRIPTOR_DECL\n");
+                }
+
+                // Print event property enums
+                if (showPropertyEnums) {
+                    std::map<std::wstring, Event const*> usedEnums;
+                    for (auto const& event : events) {
+                        CollectUsedEnums(event, event.properties_, &usedEnums);
+                    }
+
+                    for (auto const& pr : usedEnums) {
+                        PrintEnum(provider.guid_, *pr.second, pr.first);
+                    }
+                }
+
+                // Print event structs
+                if (showEventStructs) {
                     printf(
-                        "\n"
-                        "#undef EVENT_DESCRIPTOR_DECL\n"
                         "\n"
                         "#pragma warning(push)\n"
                         "#pragma warning(disable: 4200) // nonstandard extension used: zero-sized array in struct\n"
-                        "\n"
                         "#pragma pack(push)\n"
                         "#pragma pack(1)\n"
                         "\n");
-                    eventIdx = 0;
-                    for (auto const& pair : events) {
-                        for (auto const& event : pair.second) {
-                            PrintCppStruct(event.properties_, eventName[eventIdx]);
-                            eventIdx += 1;
-                        }
+
+                    for (auto const& event : events) {
+                        PrintCppStruct(event.properties_, event.name_);
                     }
+
                     printf(
                         "#pragma pack(pop)\n"
-                        "#pragma warning(pop)\n"
-                        "\n");
-                }
-            } else {
-                for (auto& pair : events) {
-                    printf("        %ls::\n", pair.first.c_str());
-                    for (auto& event : pair.second) {
-                        printf("            %ls", event.opcodeName_.c_str());
-                        if (event.Level != 0) {
-                            printf(" (%ls)", event.levelName_.c_str());
-                        }
-                        printf("\n");
-
-                        if (showEventParams) {
-                            printf("                %04x %02x %02x %04x",
-                                event.Id,
-                                event.Version,
-                                event.Opcode,
-                                event.Task);
-                            if (showChannels) printf(" %02x", event.Channel);
-                            if (showLevels)   printf(" %02x", event.Level);
-                            if (showKeywords) printf(" %016llx", event.Keyword);
-                            printf("\n");
-
-                            if (event.message_[0] != L'\0') {
-                                printf("                '%ls'\n", event.message_.c_str());
-                            }
-
-                            for (auto const& prop : event.properties_) {
-                                PrintEventProperty(prop, 5, 4);
-                            }
-                        }
-                    }
+                        "#pragma warning(pop)\n");
                 }
             }
         }
 
-        if (cppFormat) {
-            printf("}\n");
-        }
+        printf("\n}\n");
     }
 
     // Done
-    if (errorCount > 0) {
-        fprintf(stderr, "error: there were %u errors\n", errorCount);
-        return 1;
-    }
-
     return 0;
 }
-

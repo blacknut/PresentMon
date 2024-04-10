@@ -1,0 +1,58 @@
+{
+  "FileVersion": 2,
+  "Id": "79fe382a-c29c-4c32-a028-b8d1abdf51b0",
+  "Items": [
+    {
+      "Id": "bd38c9b9-08d6-4f8a-af30-2ca066c65af5",
+      "Command": "--metric-list-sample"
+    },
+    {
+      "Id": "55055cc7-7bbb-4db3-8f8f-27f1b5994bd2",
+      "Command": "--wrapper-static-query-sample"
+    },
+    {
+      "Id": "aec2f3f0-8119-42e8-a154-f0362d3a79bc",
+      "Command": "--gen-csv"
+    },
+    {
+      "Id": "fdccba8e-f10c-42b0-a1d0-b71cfa1fe849",
+      "Command": "--add-gpu-metric"
+    },
+    {
+      "Id": "68093de8-734b-45c0-b00c-718b665cbb85",
+      "Command": "--check-metric-sample"
+    },
+    {
+      "Id": "905a2f3c-5d4d-4d8e-becd-182e5078fba4",
+      "Command": "--metric PM_METRIC_GPU_MEM_MAX_BANDWIDTH"
+    },
+    {
+      "Id": "c3af5374-64e9-40e0-ae04-a5e3142e0bc7",
+      "Command": "--frame-query-sample"
+    },
+    {
+      "Id": "6c0c832e-fb7b-4738-afa4-a71bc23235e9",
+      "Command": "--introspection-sample"
+    },
+    {
+      "Id": "e4c5c9a2-dee7-4185-afe1-51c4e6c3281b",
+      "Command": "--dynamic-query-sample"
+    },
+    {
+      "Id": "ef857247-b1e3-491c-931a-c1be6924dd90",
+      "Command": "--help"
+    },
+    {
+      "Id": "4d012d46-c606-4e44-91a4-8bfa0865cfbc",
+      "Command": "--process-name Balatro.exe"
+    },
+    {
+      "Id": "7f6ffa38-2a9a-480c-a811-a10c76820b74",
+      "Command": "--view-available-metrics"
+    },
+    {
+      "Id": "df9b72a0-fe65-4819-9bef-82142ab661e1",
+      "Command": "--metric-offset 1080"
+    }
+  ]
+}

@@ -3,20 +3,21 @@
 #include "PresentMon.hpp"
 
 const char* logLevel[] = { "error", "warning", "info" };
-const char* defaultLogFile = "c:\\Users\\blk\\Documents\\logs\\stream.212.presentmon.log";
-const char* defaultLogTerminateFile = "c:\\Users\\blk\\Documents\\logs\\stream.212.terminate.presentmon.log";
+const wchar_t* defaultLogFile = L"c:\\Users\\blk\\Documents\\logs\\stream.212.presentmon.log";
+const wchar_t* defaultLogTerminateFile = L"c:\\Users\\blk\\Documents\\logs\\stream.212.terminate.presentmon.log";
+const wchar_t* defaultStreamId = L"deadcafe";
 
 FILE* pLogFile = nullptr;
-char* streamId = nullptr;
+wchar_t* streamId = nullptr;
 
 void log(int level, const char* filename, const char* func, int line, const char* format, ...)
 {
 	auto const& args = GetCommandLineArgs();
-	const char* logFileName = args.mLogFile;
+	const wchar_t* logFileName = args.mLogFilename;
 
 	// Default log file.
 	if (logFileName == nullptr) {
-		if (args.mTerminateExisting) {
+		if (args.mTerminateExistingSession) {
 			logFileName = defaultLogTerminateFile;
 		}
 		else {
@@ -27,32 +28,35 @@ void log(int level, const char* filename, const char* func, int line, const char
 	// Initialize log file:
 	//	- expected file name : <file_path>\\stream.<stream_id>.presentmon.log
 	if ((logFileName != nullptr) && (pLogFile == nullptr) && (streamId == nullptr)) {
-		if (fopen_s(&pLogFile, logFileName, "ab") == 0) {
-			char* strLogFileName = new char[strlen(logFileName) + 1];
-			strcpy_s(strLogFileName, strlen(logFileName) + 1, logFileName);
-			char* str = strLogFileName;
+		if (_wfopen_s(&pLogFile, logFileName, L"ab") == 0) {
+			wchar_t* strLogFileName = new wchar_t[wcslen(logFileName) + 1];
+			wcscpy_s(strLogFileName, wcslen(logFileName) + 1, logFileName);
+			wchar_t* str = strLogFileName;
 
 			// Search file name
-			char* path;
-			char* nextPath;
-			path = strtok_s(str, "\\.", &nextPath);
+			wchar_t* path;
+			wchar_t* nextPath;
+			path = wcstok_s(str, L"\\.", &nextPath);
 			while (path != nullptr) {
-				if (strcmp(path, "stream") == 0) {
+				if (wcscmp(path, L"stream") == 0) {
 					// store the stream id
-					path = strtok_s(NULL, ".", &nextPath);
-					streamId = new char[strlen(path)+1];
-					strcpy_s(streamId, strlen(path)+1, path);
+					path = wcstok_s(NULL, L".", &nextPath);
+					streamId = new wchar_t[wcslen(path)+1];
+					wcscpy_s(streamId, wcslen(path)+1, path);
 					path = nullptr;
 				}
 				else {
-					path = strtok_s(NULL, "\\.", &nextPath);
+					path = wcstok_s(NULL, L"\\.", &nextPath);
 				}
 			}
 
 			delete[] strLogFileName;
 		}
 	}
-
+	if (streamId == nullptr) {
+		streamId = new wchar_t[wcslen(defaultStreamId) + 1];
+		wcscpy_s(streamId, wcslen(defaultStreamId) + 1, defaultStreamId);
+	}
 	if ((pLogFile != nullptr) && (streamId != nullptr)) {
 		size_t logSize = 0;
 		char log[2048];
@@ -73,7 +77,7 @@ void log(int level, const char* filename, const char* func, int line, const char
 		strftime(logDate, sizeof(logDate), "%Y-%m-%dT%H:%M:%S", &tmDest);
 
 		// Write the log
-		logSize += snprintf(log + logSize, sizeof(log) - logSize, "stream=\"%s\" ", streamId);
+		logSize += snprintf(log + logSize, sizeof(log) - logSize, "stream=\"%S\" ", streamId);
 		logSize += snprintf(log + logSize, sizeof(log) - logSize, "time=\"%s\" ", logDate);
 		logSize += snprintf(log + logSize, sizeof(log) - logSize, "level=\"%s\" ", logLevel[level]);
 		logSize += snprintf(log + logSize, sizeof(log) - logSize, "thread=\"%d\" ", GetCurrentThreadId());

@@ -1,7 +1,10 @@
-// Copyright (C) 2020-2021 Intel Corporation
+// Copyright (C) 2020-2023 Intel Corporation
 // SPDX-License-Identifier: MIT
 
 #include "PresentMonTests.h"
+
+#include <initializer_list>
+#include <unordered_set>
 
 void AddTestFailure(char const* file, int line, char const* fmt, ...)
 {
@@ -17,94 +20,162 @@ void AddTestFailure(char const* file, int line, char const* fmt, ...)
 
 namespace {
 
-size_t FindHeader(
-    char const* header,
-    uint32_t* requiredCount,
-    uint32_t* trackDisplayCount,
-    uint32_t* trackDebugCount)
+void CheckAll(size_t const* columnIndex, bool* ok, std::initializer_list<PresentMonCsv::Header> const& headers)
 {
-    size_t idx = 0;
-    for (size_t i = 0; i < _countof(PresentMonCsv::REQUIRED_HEADER); ++i, ++idx) {
-        if (strcmp(header, PresentMonCsv::REQUIRED_HEADER[i]) == 0) {
-            *requiredCount += 1;
-            return idx;
+    for (auto const& h : headers) {
+        if (columnIndex[h] == SIZE_MAX) {
+            *ok = false;
+            return;
         }
     }
-    for (size_t i = 0; i < _countof(PresentMonCsv::TRACK_DISPLAY_HEADER); ++i, ++idx) {
-        if (strcmp(header, PresentMonCsv::TRACK_DISPLAY_HEADER[i]) == 0) {
-            *trackDisplayCount += 1;
-            return idx;
+}
+
+size_t CheckOne(size_t const* columnIndex, bool* ok, std::initializer_list<PresentMonCsv::Header> const& headers)
+{
+    size_t i = 0;
+    for (auto const& h : headers) {
+        if (columnIndex[h] != SIZE_MAX) {
+            for (auto const& h2 : headers) {
+                if (h2 != h && columnIndex[h2] != SIZE_MAX) {
+                    *ok = false;
+                    break;
+                }
+            }
+            return i;
         }
+        ++i;
     }
-    for (size_t i = 0; i < _countof(PresentMonCsv::TRACK_DEBUG_HEADER); ++i, ++idx) {
-        if (strcmp(header, PresentMonCsv::TRACK_DEBUG_HEADER[i]) == 0) {
-            *trackDebugCount += 1;
-            return idx;
-        }
-    }
-    for (size_t i = 0; i < _countof(PresentMonCsv::OPT_HEADER); ++i, ++idx) {
-        if (strcmp(header, PresentMonCsv::OPT_HEADER[i]) == 0) {
-            return idx;
-        }
-    }
+    *ok = false;
     return SIZE_MAX;
 }
 
+bool CheckAllIfAny(size_t const* columnIndex, bool* ok, std::initializer_list<PresentMonCsv::Header> const& headers)
+{
+    for (auto const& h : headers) {
+        if (columnIndex[h] != SIZE_MAX) {
+            CheckAll(columnIndex, ok, headers);
+            return true;
+        }
+    }
+    return false;
 }
 
-PresentMonCsv::PresentMonCsv()
-    : line_(0)
-    , fp_(nullptr)
-    , trackDisplay_(false)
-    , trackDebug_(false)
+PresentMonCsv::Header FindHeader(char const* header)
 {
+    for (uint32_t i = 0; i < PresentMonCsv::KnownHeaderCount; ++i) {
+        auto h = (PresentMonCsv::Header) i;
+        if (strcmp(header, PresentMonCsv::GetHeaderString(h)) == 0) {
+            return h;
+        }
+    }
+    return PresentMonCsv::UnknownHeader;
+}
+
 }
 
 bool PresentMonCsv::Open(char const* file, int line, std::wstring const& path)
 {
-    memset(headerColumnIndex_, 0xff, sizeof(headerColumnIndex_));
+    // Load the CSV
+    for (uint32_t i = 0; i < _countof(headerColumnIndex_); ++i) {
+        headerColumnIndex_[i] = SIZE_MAX;
+    }
     cols_.clear();
     path_ = path;
     line_ = 0;
 
-    if (_wfopen_s(&fp_, path.c_str(), L"rb")) {
+    if (_wfopen_s(&fp_, path.c_str(), L"r")) {
         AddTestFailure(file, line, "Failed to open file: %ls", path.c_str());
         return false;
     }
 
     // Remove UTF-8 marker if there is one.
-    long int startOfs = 0;
-    if (fread(row_, 3, 1, fp_) == 1 &&
-        row_[0] == -17 &&
-        row_[1] == -69 &&
-        row_[2] == -65) {
-        startOfs = 3;
+    if (fread(row_, 3, 1, fp_) != 1 ||
+        row_[0] != -17 || // 0xef
+        row_[1] != -69 || // 0xbb
+        row_[2] != -65) { // 0xbf
+        fseek(fp_, 0, SEEK_SET);
     }
-    fseek(fp_, startOfs, SEEK_SET);
 
     // Read the header and ensure required columns are present
     ReadRow();
 
-    uint32_t requiredCount = 0;
-    uint32_t trackDisplayCount = 0;
-    uint32_t trackDebugCount = 0;
-    for (uint32_t i = 0, n = (uint32_t) cols_.size(); i < n; ++i) {
-        auto idx = FindHeader(cols_[i], &requiredCount, &trackDisplayCount, &trackDebugCount);
-        if (idx == SIZE_MAX) {
+    for (size_t i = 0, n = cols_.size(); i < n; ++i) {
+        auto h = FindHeader(cols_[i]);
+        switch (h) {
+        case KnownHeaderCount:
+        case UnknownHeader:
             AddTestFailure(Convert(path_).c_str(), (int) line_, "Unrecognised column: %s", cols_[i]);
-        } else if (headerColumnIndex_[idx] != SIZE_MAX) {
-            AddTestFailure(Convert(path_).c_str(), (int) line_, "Duplicate column: %s", cols_[i]);
-        } else {
-            headerColumnIndex_[idx] = i;
+            break;
+        default:
+            if (headerColumnIndex_[(size_t) h] != SIZE_MAX) {
+                AddTestFailure(Convert(path_).c_str(), (int) line_, "Duplicate column: %s", cols_[i]);
+            } else {
+                headerColumnIndex_[(size_t) h] = i;
+            }
+            break;
         }
     }
 
-    trackDisplay_ = trackDisplayCount > 0;
-    trackDebug_ = trackDebugCount > 0;
+    bool columnsOK = true;
+    CheckAll(headerColumnIndex_, &columnsOK, { Header_Application,
+                                               Header_ProcessID,
+                                               Header_SwapChainAddress,
+                                               Header_Runtime,
+                                               Header_SyncInterval,
+                                               Header_PresentFlags });
 
-    if (requiredCount != _countof(REQUIRED_HEADER) ||
-        (trackDisplay_ && trackDisplayCount != _countof(TRACK_DISPLAY_HEADER)) ||
-        (trackDebug_   && trackDebugCount   != _countof(TRACK_DEBUG_HEADER))) {
+    auto v1 = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_Dropped,
+                                                              Header_TimeInSeconds,
+                                                              Header_msBetweenPresents,
+                                                              Header_msInPresentAPI });
+    if (v1) {
+        auto qpc_time        = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_QPCTime, });
+        auto track_display   = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_AllowsTearing,
+                                                                               Header_PresentMode,
+                                                                               Header_msBetweenDisplayChange,
+                                                                               Header_msUntilRenderComplete,
+                                                                               Header_msUntilDisplayed });
+        auto track_gpu       = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_msUntilRenderStart,
+                                                                               Header_msGPUActive });
+        auto track_gpu_video = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_msGPUVideoActive });
+        auto track_input     = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_msSinceInput });
+
+                              params_.emplace_back(L"--v1_metrics");
+        if (qpc_time)         params_.emplace_back(L"--qpc_time");
+        if (!track_display)   params_.emplace_back(L"--no_track_display");
+        if (!track_gpu)       params_.emplace_back(L"--no_track_gpu");
+        if (track_gpu_video)  params_.emplace_back(L"--track_gpu_video");
+        if (!track_input)     params_.emplace_back(L"--no_track_input");
+    } else {
+        CheckAll(headerColumnIndex_, &columnsOK, { Header_CPUBusy,
+                                                   Header_CPUWait });
+
+        size_t time          = CheckOne(headerColumnIndex_, &columnsOK,      { Header_CPUStartTime,
+                                                                               Header_CPUStartQPC,
+                                                                               Header_CPUStartQPCTime,
+                                                                               Header_CPUStartDateTime });
+        auto track_display   = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_AllowsTearing,
+                                                                               Header_PresentMode,
+                                                                               Header_DisplayLatency,
+                                                                               Header_DisplayedTime });
+        auto track_gpu       = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_GPULatency,
+                                                                               Header_GPUBusy,
+                                                                               Header_GPUWait });
+        auto track_gpu_video = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_VideoBusy });
+        auto track_input     = CheckAllIfAny(headerColumnIndex_, &columnsOK, { Header_ClickToPhotonLatency });
+
+        switch (time) {
+        case 1: params_.emplace_back(L"--qpc_time");    break;
+        case 2: params_.emplace_back(L"--qpc_time_ms"); break;
+        case 3: params_.emplace_back(L"--date_time");   break;
+        }
+        if (!track_display)  params_.emplace_back(L"--no_track_display");
+        if (!track_gpu)      params_.emplace_back(L"--no_track_gpu");
+        if (track_gpu_video) params_.emplace_back(L"--track_gpu_video");
+        if (!track_input)    params_.emplace_back(L"--no_track_input");
+    }
+
+    if (!columnsOK) {
         AddTestFailure(Convert(path_).c_str(), (int) line_, "Missing required columns.");
     }
 
@@ -151,11 +222,8 @@ bool PresentMonCsv::ReadRow()
 
 size_t PresentMonCsv::GetColumnIndex(char const* header) const
 {
-    uint32_t na = 0;
-    auto headerIdx = FindHeader(header, &na, &na, &na);
-    return headerIdx == SIZE_MAX
-        ? SIZE_MAX
-        : headerColumnIndex_[headerIdx];
+    auto h = FindHeader(header);
+    return h < KnownHeaderCount ? headerColumnIndex_[h] : SIZE_MAX;
 }
 
 PresentMon::PresentMon()
@@ -164,7 +232,7 @@ PresentMon::PresentMon()
 {
     cmdline_ += L'\"';
     cmdline_ += exePath_;
-    cmdline_ += L"\" -no_top";
+    cmdline_ += L"\" --no_console_stats";
 }
 
 PresentMon::~PresentMon()
@@ -176,7 +244,7 @@ PresentMon::~PresentMon()
 
 void PresentMon::AddEtlPath(std::wstring const& etlPath)
 {
-    cmdline_ += L" -etl_file \"";
+    cmdline_ += L" --etl_file \"";
     cmdline_ += etlPath;
     cmdline_ += L'\"';
 }
@@ -184,7 +252,7 @@ void PresentMon::AddEtlPath(std::wstring const& etlPath)
 void PresentMon::AddCsvPath(std::wstring const& csvPath)
 {
     EXPECT_FALSE(csvArgSet_);
-    cmdline_ += L" -output_file \"";
+    cmdline_ += L" --output_file \"";
     cmdline_ += csvPath;
     cmdline_ += L'\"';
     csvArgSet_ = true;
@@ -203,7 +271,7 @@ void PresentMon::Add(wchar_t const* args)
 void PresentMon::Start(char const* file, int line)
 {
     if (!csvArgSet_) {
-        cmdline_ += L" -no_csv";
+        cmdline_ += L" --no_csv";
         csvArgSet_ = true;
     }
 

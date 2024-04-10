@@ -1,4 +1,4 @@
-:: Copyright (C) 2020-2021 Intel Corporation
+:: Copyright (C) 2020-2021,2023 Intel Corporation
 :: SPDX-License-Identifier: MIT
 
 @echo off
@@ -20,19 +20,25 @@ goto args_ok
     echo usage: create_gold_csvs.cmd PresentMonPath GoldEtlCsvRootDir [force]
     exit /b 1
 :args_ok
+set already_exists=0
 
-set pmargs=-no_top -stop_existing_session -qpc_time -track_debug
 for /f "tokens=*" %%a in ('dir /s /b /a-d "%rootdir%\*.etl"') do call :create_csv "%%a"
+
+if %already_exists% neq 0 echo Use 'force' command line argument to overwrite.
 exit /b 0
 
 :create_csv
-    if exist "%~dpn1.csv" if %force% neq 1 (
-        echo Already exists: %~1
+    call :create_csv_2 %1 "%~dpn1.csv"    " "
+    call :create_csv_2 %1 "%~dpn1_v1.csv" "--v1_metrics"
+    exit /b 0
+
+:create_csv_2
+    if exist %2 if %force% neq 1 (
+        echo Already exists: %~2
+        set already_exists=1
         exit /b 0
     )
-    echo %presentmon% %pmargs% -etl_file %1 -output_file "%~dpn1.csv"
-    %presentmon% %pmargs% -etl_file %1 -output_file "%~dpn1.csv" >NUL
-    echo.
-    where /q unix2dos
-    if %errorlevel% equ 0 unix2dos -q "%~dpn1.csv"
+
+    echo %presentmon% --no_console_stats --stop_existing_session --qpc_time --track_gpu_video %~3 --etl_file %1 --output_file %2
+         %presentmon% --no_console_stats --stop_existing_session --qpc_time --track_gpu_video %~3 --etl_file %1 --output_file %2 >NUL 2>&1
     exit /b 0

@@ -1,46 +1,56 @@
-// Copyright (C) 2019-2021 Intel Corporation
+// Copyright (C) 2019-2022 Intel Corporation
 // SPDX-License-Identifier: MIT
-
 #pragma once
-
-#define DEBUG_VERBOSE 0
-#if DEBUG_VERBOSE
-
-// Time relative to first event
-#define DEBUG_START_TIME_NS     0ull
-#define DEBUG_STOP_TIME_NS      UINT64_MAX
-
 #include <stdint.h>
 
+#ifndef PRESENTMON_ENABLE_DEBUG_TRACE
+#ifdef NDEBUG
+#define PRESENTMON_ENABLE_DEBUG_TRACE 0
+#else
+#define PRESENTMON_ENABLE_DEBUG_TRACE 1
+#endif
+#endif
+
 struct PresentEvent; // Can't include PresentMonTraceConsumer.hpp because it includes Debug.hpp (before defining PresentEvent)
+struct PMTraceConsumer;
 struct EventMetadata;
 struct _EVENT_RECORD;
+union _LARGE_INTEGER;
 
-// Initialize debug system
-void DebugInitialize(LARGE_INTEGER* firstTimestamp, LARGE_INTEGER timestampFrequency);
+#if PRESENTMON_ENABLE_DEBUG_TRACE
 
-// Check if debug is complete
-bool DebugDone();
+// Enable/disable the verbose trace.
+void EnableVerboseTrace(bool enable);
+bool IsVerboseTraceEnabled();
+
+// Assertions either written to verbose trace (if enabled) or routed to assert().
+void DebugAssertImpl(wchar_t const* msg, wchar_t const* file, int line);
+#define DebugAssertWide1(x) L##x
+#define DebugAssertWide2(x) DebugAssertWide1(x)
+#define DebugAssert(condition) !!(condition) || (DebugAssertImpl(L#condition, DebugAssertWide2(__FILE__), __LINE__), false)
+
+// Should call this before modifying a PresentEvent member; causes those changes to be
+// included in the verbose trace.
+void VerboseTraceBeforeModifyingPresentImpl(PresentEvent const* p);
+#define VerboseTraceBeforeModifyingPresent(p) !IsVerboseTraceEnabled() || (VerboseTraceBeforeModifyingPresentImpl(p), false)
 
 // Print debug information about the handled event
-void DebugEvent(_EVENT_RECORD* eventRecord, EventMetadata* metadata);
-
-// Call when a new present is created
-void DebugCreatePresent(PresentEvent const& p);
-
-// Call before modifying any present
-void DebugModifyPresent(PresentEvent const& p);
-
-// Call when a present is lost
-void DebugLostPresent(PresentEvent const& p);
+void VerboseTraceEventImpl(PMTraceConsumer* pmConsumer, _EVENT_RECORD* eventRecord, EventMetadata* metadata);
+#define VerboseTraceEvent(c, e, m) !IsVerboseTraceEnabled() || (VerboseTraceEventImpl(c, e, m), false)
 
 #else
 
-#define DebugInitialize(firstTimestamp, timestampFrequency) (void) firstTimestamp, timestampFrequency
-#define DebugDone()                                         false
-#define DebugEvent(eventRecord, metadata)                   (void) eventRecord, metadata
-#define DebugCreatePresent(p)                               (void) p
-#define DebugModifyPresent(p)                               (void) p
-#define DebugLostPresent(p)                                 (void) p
+// When PRESENTMON_ENABLE_DEBUG_TRACE==0, all of the the verbose trace infrastructure should
+// get optimized away.
+#define IsVerboseTraceEnabled() false
+#define DebugAssert(condition)
+#define VerboseTraceBeforeModifyingPresent(p)
+#define VerboseTraceEvent(c, e, m)
 
 #endif
+
+// Print a time or time range.  You must call InitializeTimeStampInfo() before
+// either of the PrintTime...() functions.
+void InitializeTimestampInfo(_LARGE_INTEGER* firstTimestamp, _LARGE_INTEGER const& timestampFrequency);
+int PrintTime(uint64_t timestampValue);
+int PrintTimeDelta(uint64_t timestampValue);
